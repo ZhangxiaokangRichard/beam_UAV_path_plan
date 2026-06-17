@@ -1,0 +1,141 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+  - Class: rviz/Tool Properties
+    Name: Tool Properties
+
+Visualization Manager:
+  Displays:
+    # ── 1. TF 坐标系（显示所有 TF 帧）─────────────────────────
+    - Class: rviz/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 200
+      Show Names: false
+      Show Axes: true
+      Show Arrows: true
+      Update Interval: 0
+
+    # ── 2. 障碍物（灰色半透明 AABB 方块）──────────────────────
+    - Class: rviz/MarkerArray
+      Name: Obstacles
+      Enabled: true
+      Topic: /obstacles
+      Queue Size: 10
+
+    # ── 3. 空间边界（线框）────────────────────────────────────
+    - Class: rviz/Marker
+      Name: EnvBounds
+      Enabled: true
+      Topic: /env/bounds
+      Queue Size: 10
+
+    # ── 4. UAV 位姿（橙色箭头）────────────────────────────────
+    - Class: rviz/Odometry
+      Name: UAV State
+      Enabled: true
+      Topic: /uav/state
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+      Keep: 1
+      Shape: Arrow
+      Shaft Length: 150
+      Shaft Diameter: 20
+      Head Length: 60
+      Head Diameter: 40
+      Color: 255; 140; 0
+
+    # ── 5. UAV 航迹（紫色线）──────────────────────────────────
+    - Class: rviz/Path
+      Name: UAV Trail
+      Enabled: true
+      Topic: /uav/trail
+      Line Style: Lines
+      Line Width: 0.1
+      Color: 148; 112; 219
+      Alpha: 0.8
+      Buffer Length: 10000
+
+    # ── 6. 目标位姿（红色球 + 箭头）───────────────────────────
+    - Class: rviz/Odometry
+      Name: Target State
+      Enabled: true
+      Topic: /target/state
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+      Keep: 1
+      Shape: Arrow
+      Shaft Length: 100
+      Shaft Diameter: 15
+      Head Length: 40
+      Head Diameter: 30
+      Color: 255; 0; 0
+
+    # ── 7. 规划路径（橙色线，粗）──────────────────────────────
+    - Class: rviz/Path
+      Name: Planned Path
+      Enabled: true
+      Topic: /beam_dubins/path
+      Line Style: Lines
+      Line Width: 0.15
+      Color: 255; 140; 0
+      Alpha: 0.9
+      Buffer Length: 1
+
+    # ── 8. 搜索树（青色线段，半透明）──────────────────────────
+    - Class: rviz/Marker
+      Name: Search Tree
+      Enabled: true
+      Topic: /beam_dubins/search_tree
+      Queue Size: 10
+
+    # ── 9. 状态文本（白色文字）────────────────────────────────
+    - Class: rviz/Marker
+      Name: Status Text
+      Enabled: true
+      Topic: /sim/status_text
+      Queue Size: 10
+
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+
+  Views:
+    # ── 视图1：Top-Down 2D 俯视 ───────────────────────────────
+    - Class: rviz/Orbit
+      Name: Top-Down 2D
+      Target Frame: map
+      Distance: 12000
+      Yaw: 0
+      Pitch: 1.57
+      Focal Point:
+        X: 5000
+        Y: 2500
+        Z: 500
+
+    # ── 视图2：Perspective 3D 斜视 ────────────────────────────
+    - Class: rviz/Orbit
+      Name: Perspective 3D
+      Target Frame: map
+      Distance: 10000
+      Yaw: 0.785
+      Pitch: 0.785
+      Focal Point:
+        X: 5000
+        Y: 2500
+        Z: 500
+
+    # ── 视图3：UAV 跟随 3D ────────────────────────────────────
+    - Class: rviz/ThirdPersonFollower
+      Name: UAV Chase 3D
+      Target Frame: uav_base_link
+      Distance: 600
+
+  Tools:
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/Interact
+      Hide Inactive Objects: true

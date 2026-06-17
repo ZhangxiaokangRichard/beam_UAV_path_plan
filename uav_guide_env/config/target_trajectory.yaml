@@ -1,0 +1,29 @@
+# ═══════════════════════════════════════════════════════════════
+# 目标轨迹参数（环境层使用）
+# 从 Python config/target_trajectory.json 迁移
+# ═══════════════════════════════════════════════════════════════
+
+initial_position: [4000.0, 2500.0, 600.0]  # [x, y, z]
+initial_heading_deg: 0                      # 初始航向 (°)
+trajectory_type: "line"                     # static / line / racetrack / circle
+
+trajectories:
+  static:
+    speed_mps: 0
+
+  line:
+    direction_deg: 90                       # 运动方向 (°)，90=向北
+    speed_mps: 20.0                         # 速度 (m/s)
+    length_m: 4000.0                        # 最大行程 (m)
+
+  racetrack:
+    straight_length_m: 1000.0               # 直线段长度 (m)
+    turn_radius_m: 300.0                    # 弯道半径 (m)
+    direction_deg: 0.0                      # 起始方向 (°)
+    altitude_m: 600.0                       # 飞行高度 (m)
+    lap_speed_mps: 30.0                     # 绕圈速度 (m/s)
+
+  circle:
+    center: [8000.0, 2500.0, 600.0]        # 圆心 [x, y, z]
+    radius_m: 500.0                         # 半径 (m)
+    angular_speed_dps: 5.0                  # 角速度 (°/s)

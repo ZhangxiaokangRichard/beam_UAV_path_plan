@@ -1,0 +1,15 @@
+<launch>
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- Beam Dubins 规划服务节点启动文件（Phase 2a）              -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+
+    <!-- 加载算法参数到 /beam_dubins/ 命名空间 -->
+    <rosparam file="$(find beam_dubins)/config/beam_dubins.yaml"
+              command="load" ns="beam_dubins"/>
+
+    <!-- 规划服务节点 -->
+    <node name="planner_server" pkg="beam_dubins"
+          type="planner_server" output="screen"
+          respawn="false">
+    </node>
+</launch>

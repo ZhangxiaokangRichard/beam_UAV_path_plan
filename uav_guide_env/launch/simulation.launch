@@ -1,0 +1,45 @@
+<launch>
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- UAV 引导仿真全栈启动文件（Phase 2c 启用）                 -->
+    <!-- Phase 2b：仅加载参数 + 启动 planner_server                 -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+
+    <!-- 1. 启动算法层（planner_server） -->
+    <include file="$(find beam_dubins)/launch/planner.launch"/>
+
+    <!-- 2. 加载环境参数 -->
+    <rosparam file="$(find uav_guide_env)/config/uav_dynamics.yaml"
+              command="load" ns="uav"/>
+    <rosparam file="$(find uav_guide_env)/config/target_trajectory.yaml"
+              command="load" ns="target"/>
+    <rosparam file="$(find uav_guide_env)/config/scenario.yaml"
+              command="load" ns="scenario"/>
+
+    <!-- 3. 空间边界参数（也加载到 /space 和 /simulation 命名空间） -->
+    <rosparam ns="space" param="lx">10000.0</rosparam>
+    <rosparam ns="space" param="ly">5000.0</rosparam>
+    <rosparam ns="space" param="lz">1000.0</rosparam>
+    <rosparam ns="space" param="boundary_margin">50.0</rosparam>
+    <rosparam ns="simulation" param="dt">0.1</rosparam>
+    <rosparam ns="simulation" param="plan_interval">2</rosparam>
+    <rosparam ns="simulation" param="beam_reset_interval">30</rosparam>
+
+    <!-- ═══════ Phase 2c+3 启用 ═══════════════════════════════════ -->
+    <!-- 4. TF：发布 map→odom 静态变换（100ms 周期持续发布，确保 Rviz 可见） -->
+    <node pkg="tf" type="static_transform_publisher" name="map_to_odom"
+          args="0 0 0 0 0 0 map odom 10"/>
+
+    <!-- 5. 仿真主循环 -->
+    <node name="simulation_loop" pkg="uav_guide_env"
+          type="simulation_loop" output="screen">
+    </node>
+
+    <!-- 6. 可视化发布节点 -->
+    <node name="rviz_publisher" pkg="uav_guide_env"
+          type="rviz_publisher" output="screen"/>
+
+    <!-- 7. Rviz 3D 可视化（可选，需要图形界面） -->
+    <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find uav_guide_env)/config/rviz/beam_dubins_3d.rviz"
+          required="false"/>
+</launch>

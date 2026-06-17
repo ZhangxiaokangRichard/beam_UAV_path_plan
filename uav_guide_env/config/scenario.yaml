@@ -1,0 +1,46 @@
+# ═══════════════════════════════════════════════════════════════
+# 仿真场景统一配置（Phase 2b 新增）
+# 从 Python test_cases/scenario_2d.py → Scenario2D 迁移
+# ═══════════════════════════════════════════════════════════════
+
+scenario_type: "channel_2d"       # 场景类型：channel_2d / channel_3d / free_space
+
+# ── UAV 起始状态 ──────────────────────────────────────────
+start: [2000.0, 1000.0, 500.0, 1.5708, 0.0]  # [x, y, z, yaw, pitch]
+# yaw=π/2=90° 向北飞行
+
+# ── 空间边界（与 beam_dubins 共用）───────────────────────
+space:
+  lx: 10000.0                     # X 范围 (m)
+  ly: 5000.0                      # Y 范围 (m)
+  lz: 1000.0                      # Z 范围 (m)
+  boundary_margin: 50.0           # 边界安全距离 (m)
+
+# ── 障碍物定义 ────────────────────────────────────────────
+obstacles:
+  # 左墙（通道下边界 y < 2450 被封锁）
+  - id: 0
+    type: "dynamic"               # dynamic=动态跟随目标 Y
+    position: [3000.0, 450.0, 0.0]  # 初始角点 [x, y, z]
+    size: [2000.0, 2000.0, 1000.0]  # [dx, dy, dz]
+    safe_margin: 5.0
+    follow: "goal_y_neg"          # 跟随目标 Y 负方向偏移
+    offset_y: -50.0               # 内边 = goal_y - 50
+
+  # 右墙（通道上边界 y > 2550 被封锁）
+  - id: 1
+    type: "dynamic"
+    position: [3000.0, 2550.0, 0.0]
+    size: [2000.0, 2000.0, 1000.0]
+    safe_margin: 5.0
+    follow: "goal_y_pos"
+    offset_y: 50.0                # 内边 = goal_y + 50
+
+# ── 可选：3D 通道场景（Phase 4a 启用）───────────────────
+# 3d_obstacles:
+#   - id: 0
+#     type: "static"
+#     position: [7000.0, 2450.0, 650.0]
+#     size: [2000.0, 100.0, 10.0]
+#     safe_margin: 5.0
+#   ... (上/下/左/右 四面墙)

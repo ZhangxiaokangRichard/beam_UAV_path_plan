@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>uav_guide_env</name>
+  <version>0.1.0</version>
+  <description>
+    UAV 引导仿真环境包（Phase 2b：环境模型骨架）。
+    提供固定翼 UAV 运动学模型、动态目标轨迹生成、AABB 障碍物管理。
+    依赖 beam_dubins 算法包进行路径规划。
+  </description>
+
+  <maintainer email="ros-dev@example.com">ros-dev</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf</depend>
+  <depend>beam_dubins</depend>
+
+  <export>
+  </export>
+</package>
