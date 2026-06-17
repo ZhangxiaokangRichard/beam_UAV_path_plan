@@ -162,6 +162,15 @@ static visualization_msgs::Marker makeStatusTextMarker(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// UAV / 目标 位姿缓存（用于 3D 模型 Marker 发布）
+// ═══════════════════════════════════════════════════════════════
+
+static nav_msgs::Odometry g_last_uav_odom;
+static nav_msgs::Odometry g_last_target_odom;
+static bool g_has_uav    = false;
+static bool g_has_target = false;
+
+// ═══════════════════════════════════════════════════════════════
 // 目标状态回调（获取当前 goal_y 用于动态障碍物更新）
 // ═══════════════════════════════════════════════════════════════
 
@@ -169,6 +178,9 @@ static void targetStateCallback(const nav_msgs::Odometry::ConstPtr& msg,
                                 VizState* state)
 {
     state->current_goal_y = msg->pose.pose.position.y;
+    // 同时缓存用于 3D 模型 Marker
+    g_last_target_odom = *msg;
+    g_has_target = true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -180,6 +192,78 @@ static std::string g_status_text = "Beam Dubins Simulation";
 static void simStatusCallback(const std_msgs::String::ConstPtr& msg)
 {
     g_status_text = msg->data;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UAV 状态回调
+// ═══════════════════════════════════════════════════════════════
+
+static void uavStateCallback(const nav_msgs::Odometry::ConstPtr& msg)
+{
+    g_last_uav_odom = *msg;
+    g_has_uav = true;
+}
+
+/// 构建 UAV 3D 模型 Marker（橙色箭头，显示位置+朝向）
+static visualization_msgs::Marker makeUavModelMarker(
+    const nav_msgs::Odometry& odom, const ros::Time& stamp)
+{
+    visualization_msgs::Marker m;
+    m.header.stamp    = stamp;
+    m.header.frame_id = "odom";
+    m.ns      = "uav_model";
+    m.id      = 0;
+    m.type    = visualization_msgs::Marker::ARROW;
+    m.action  = visualization_msgs::Marker::ADD;
+
+    // 箭头起点 = UAV 位置后移半个箭头长度（沿朝向反方向）
+    double yaw = 2.0 * std::atan2(odom.pose.pose.orientation.z,
+                                   odom.pose.pose.orientation.w);
+    double shaft_len = 400.0;
+    m.points.resize(2);
+    m.points[0].x = odom.pose.pose.position.x - shaft_len * 0.5 * std::cos(yaw);
+    m.points[0].y = odom.pose.pose.position.y - shaft_len * 0.5 * std::sin(yaw);
+    m.points[0].z = odom.pose.pose.position.z;
+    m.points[1].x = odom.pose.pose.position.x + shaft_len * 0.5 * std::cos(yaw);
+    m.points[1].y = odom.pose.pose.position.y + shaft_len * 0.5 * std::sin(yaw);
+    m.points[1].z = odom.pose.pose.position.z;
+
+    m.scale.x = 20.0;   // 箭杆直径 (m)
+    m.scale.y = 50.0;   // 箭头直径 (m)
+    m.scale.z = 0;
+
+    m.color.r = 1.0f;
+    m.color.g = 0.55f;
+    m.color.b = 0.0f;
+    m.color.a = 1.0f;
+    m.lifetime = ros::Duration(0.5);  // 短存活期，持续刷新
+    return m;
+}
+
+/// 构建目标 3D 模型 Marker（红色球体）
+static visualization_msgs::Marker makeTargetModelMarker(
+    const nav_msgs::Odometry& odom, const ros::Time& stamp)
+{
+    visualization_msgs::Marker m;
+    m.header.stamp    = stamp;
+    m.header.frame_id = "odom";
+    m.ns      = "target_model";
+    m.id      = 0;
+    m.type    = visualization_msgs::Marker::SPHERE;
+    m.action  = visualization_msgs::Marker::ADD;
+    m.pose.position.x = odom.pose.pose.position.x;
+    m.pose.position.y = odom.pose.pose.position.y;
+    m.pose.position.z = odom.pose.pose.position.z;
+    m.pose.orientation.w = 1.0;
+    m.scale.x = 80.0;
+    m.scale.y = 80.0;
+    m.scale.z = 80.0;
+    m.color.r = 1.0f;
+    m.color.g = 0.0f;
+    m.color.b = 0.0f;
+    m.color.a = 0.8f;
+    m.lifetime = ros::Duration(0.5);
+    return m;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -245,6 +329,8 @@ int main(int argc, char** argv)
         boost::bind(targetStateCallback, _1, &state));
     ros::Subscriber sub_status = nh.subscribe<std_msgs::String>(
         "/sim/status", 10, simStatusCallback);
+    ros::Subscriber sub_uav_state = nh.subscribe<nav_msgs::Odometry>(
+        "/uav/state", 10, uavStateCallback);
 
     // ── 发布 ──────────────────────────────────────────────────
     ros::Publisher pub_obstacles   = nh.advertise<visualization_msgs::MarkerArray>(
@@ -253,6 +339,10 @@ int main(int argc, char** argv)
         "/env/bounds", 10, true); // latched
     ros::Publisher pub_status_text = nh.advertise<visualization_msgs::Marker>(
         "/sim/status_text", 10);
+    ros::Publisher pub_uav_model   = nh.advertise<visualization_msgs::Marker>(
+        "/uav/model", 10);
+    ros::Publisher pub_target_model = nh.advertise<visualization_msgs::Marker>(
+        "/target/model", 10);
 
     // ── 发布一次性（latched）Markers ─────────────────────────
     // 空间边界（不变，发布一次即可）
@@ -300,17 +390,32 @@ int main(int argc, char** argv)
             // ── 状态文本 Marker ───────────────────────────────
             auto text_marker = makeStatusTextMarker(g_status_text, now);
             pub_status_text.publish(text_marker);
+
+            // ── UAV 3D 模型 Marker（橙色箭头）───────────────
+            if (g_has_uav) {
+                auto uav_mkr = makeUavModelMarker(g_last_uav_odom, now);
+                pub_uav_model.publish(uav_mkr);
+            }
+
+            // ── 目标 3D 模型 Marker（红色球体）─────────────
+            if (g_has_target) {
+                auto tgt_mkr = makeTargetModelMarker(g_last_target_odom, now);
+                pub_target_model.publish(tgt_mkr);
+            }
         });
 
-    ROS_INFO("[rviz_publisher] 可视化节点就绪，发布 /obstacles /env/bounds /sim/status_text");
+    ROS_INFO("[rviz_publisher] 可视化节点就绪，发布 /obstacles /env/bounds /sim/status_text /uav/model /target/model");
     ROS_INFO("[rviz_publisher] 在 Rviz 中可通过以下 Display 订阅:");
+    ROS_INFO("  - Grid: 白色网格背景（200m 单元格）");
     ROS_INFO("  - MarkerArray: /obstacles (障碍物)");
     ROS_INFO("  - Marker: /env/bounds (边界线框)");
     ROS_INFO("  - Marker: /sim/status_text (状态文本)");
-    ROS_INFO("  - Odometry: /uav/state (UAV 位姿)");
+    ROS_INFO("  - Marker: /uav/model (UAV 3D 箭头)");
+    ROS_INFO("  - Marker: /target/model (目标 3D 球体)");
+    ROS_INFO("  - Odometry: /uav/state (UAV 位姿箭头)");
     ROS_INFO("  - Path: /uav/trail (航迹)");
     ROS_INFO("  - Path: /beam_dubins/path (规划路径)");
-    ROS_INFO("  - Odometry: /target/state (目标)");
+    ROS_INFO("  - Odometry: /target/state (目标位姿箭头)");
     ROS_INFO("  - TF: uav_base_link, target_link");
 
     ros::spin();

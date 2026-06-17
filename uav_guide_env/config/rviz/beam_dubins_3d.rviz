@@ -8,32 +8,49 @@ Panels:
 
 Visualization Manager:
   Displays:
-    # ── 1. TF 坐标系（显示所有 TF 帧）─────────────────────────
+    # ── 1. 网格地图（白色网格，以 map 为中心）─────────────────
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: map
+      Plane Cell Count: 100
+      Normal Cell Count: 1
+      Cell Size: 200
+      Line Style: Lines
+      Color: 180; 180; 180
+      Alpha: 0.5
+      Plane: XY
+      Offset:
+        X: 5000
+        Y: 2500
+        Z: 0
+
+    # ── 2. TF 坐标系（显示所有 TF 帧）─────────────────────────
     - Class: rviz/TF
       Name: TF
       Enabled: true
       Frame Timeout: 15
       Marker Scale: 200
-      Show Names: false
+      Show Names: true
       Show Axes: true
       Show Arrows: true
       Update Interval: 0
 
-    # ── 2. 障碍物（灰色半透明 AABB 方块）──────────────────────
+    # ── 3. 障碍物（灰色半透明 AABB 方块）──────────────────────
     - Class: rviz/MarkerArray
       Name: Obstacles
       Enabled: true
       Topic: /obstacles
       Queue Size: 10
 
-    # ── 3. 空间边界（线框）────────────────────────────────────
+    # ── 4. 空间边界（线框）────────────────────────────────────
     - Class: rviz/Marker
       Name: EnvBounds
       Enabled: true
       Topic: /env/bounds
       Queue Size: 10
 
-    # ── 4. UAV 位姿（橙色箭头）────────────────────────────────
+    # ── 5. UAV 位姿（橙色箭头，大尺寸易见）────────────────────
     - Class: rviz/Odometry
       Name: UAV State
       Enabled: true
@@ -42,24 +59,32 @@ Visualization Manager:
       Angle Tolerance: 0.1
       Keep: 1
       Shape: Arrow
-      Shaft Length: 150
-      Shaft Diameter: 20
-      Head Length: 60
-      Head Diameter: 40
+      Shaft Length: 300
+      Shaft Diameter: 40
+      Head Length: 120
+      Head Diameter: 80
       Color: 255; 140; 0
+      Alpha: 1.0
 
-    # ── 5. UAV 航迹（紫色线）──────────────────────────────────
+    # ── 6. UAV 3D 模型（Mesh 箭头，更直观）────────────────────
+    - Class: rviz/Marker
+      Name: UAV Model
+      Enabled: true
+      Topic: /uav/model
+      Queue Size: 10
+
+    # ── 7. UAV 航迹（紫色线）──────────────────────────────────
     - Class: rviz/Path
       Name: UAV Trail
       Enabled: true
       Topic: /uav/trail
       Line Style: Lines
-      Line Width: 0.1
+      Line Width: 5.0
       Color: 148; 112; 219
       Alpha: 0.8
       Buffer Length: 10000
 
-    # ── 6. 目标位姿（红色球 + 箭头）───────────────────────────
+    # ── 8. 目标位姿（红色箭头）────────────────────────────────
     - Class: rviz/Odometry
       Name: Target State
       Enabled: true
@@ -68,31 +93,39 @@ Visualization Manager:
       Angle Tolerance: 0.1
       Keep: 1
       Shape: Arrow
-      Shaft Length: 100
-      Shaft Diameter: 15
-      Head Length: 40
-      Head Diameter: 30
+      Shaft Length: 250
+      Shaft Diameter: 35
+      Head Length: 100
+      Head Diameter: 70
       Color: 255; 0; 0
+      Alpha: 1.0
 
-    # ── 7. 规划路径（橙色线，粗）──────────────────────────────
+    # ── 9. 目标 3D 模型（球体 Marker）─────────────────────────
+    - Class: rviz/Marker
+      Name: Target Model
+      Enabled: true
+      Topic: /target/model
+      Queue Size: 10
+
+    # ── 10. 规划路径（橙色线，粗）─────────────────────────────
     - Class: rviz/Path
       Name: Planned Path
       Enabled: true
       Topic: /beam_dubins/path
       Line Style: Lines
-      Line Width: 0.15
+      Line Width: 5.0
       Color: 255; 140; 0
       Alpha: 0.9
       Buffer Length: 1
 
-    # ── 8. 搜索树（青色线段，半透明）──────────────────────────
+    # ── 11. 搜索树（青色线段，半透明）─────────────────────────
     - Class: rviz/Marker
       Name: Search Tree
       Enabled: true
       Topic: /beam_dubins/search_tree
       Queue Size: 10
 
-    # ── 9. 状态文本（白色文字）────────────────────────────────
+    # ── 12. 状态文本（白色文字）───────────────────────────────
     - Class: rviz/Marker
       Name: Status Text
       Enabled: true
@@ -100,12 +133,13 @@ Visualization Manager:
       Queue Size: 10
 
   Global Options:
+    Background Color: 255; 255; 255
     Fixed Frame: map
     Frame Rate: 30
 
   Views:
-    # ── 视图1：Top-Down 2D 俯视 ───────────────────────────────
-    - Class: rviz/Orbit
+    Current:
+      Class: rviz/Orbit
       Name: Top-Down 2D
       Target Frame: map
       Distance: 12000
@@ -115,24 +149,21 @@ Visualization Manager:
         X: 5000
         Y: 2500
         Z: 500
-
-    # ── 视图2：Perspective 3D 斜视 ────────────────────────────
-    - Class: rviz/Orbit
-      Name: Perspective 3D
-      Target Frame: map
-      Distance: 10000
-      Yaw: 0.785
-      Pitch: 0.785
-      Focal Point:
-        X: 5000
-        Y: 2500
-        Z: 500
-
-    # ── 视图3：UAV 跟随 3D ────────────────────────────────────
-    - Class: rviz/ThirdPersonFollower
-      Name: UAV Chase 3D
-      Target Frame: uav_base_link
-      Distance: 600
+    Saved:
+      - Class: rviz/Orbit
+        Name: Perspective 3D
+        Target Frame: map
+        Distance: 10000
+        Yaw: 0.785
+        Pitch: 0.785
+        Focal Point:
+          X: 5000
+          Y: 2500
+          Z: 500
+      - Class: rviz/ThirdPersonFollower
+        Name: UAV Chase 3D
+        Target Frame: uav_base_link
+        Distance: 600
 
   Tools:
     - Class: rviz/MoveCamera
