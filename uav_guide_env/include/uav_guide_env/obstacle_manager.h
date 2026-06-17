@@ -65,6 +65,16 @@ public:
     int getId()           const { return id_; }
     void setId(int id) { id_ = id; }
 
+    /// 直接设置 AABB（通道墙壁等外部驱动场景）
+    void setAABB(const std::array<double, 3>& aabb_min,
+                 const std::array<double, 3>& aabb_max) {
+        aabb_min_ = aabb_min;
+        aabb_max_ = aabb_max;
+        // 同步更新 origin 和 size
+        origin_ = aabb_min;
+        for (int i = 0; i < 3; ++i) size_[i] = aabb_max[i] - aabb_min[i];
+    }
+
 protected:
     /// 重新计算 AABB（子类修改 origin_ 后调用）
     void updateAABB();
@@ -164,6 +174,14 @@ public:
 
     /// 快照：获取当前所有障碍物的 AABB 列表（用于规划请求）
     std::vector<std::array<double, 6>> snapshotAABBs() const;
+
+    /// 直接覆写指定障碍物的 AABB（通道墙壁等外部驱动场景）
+    void overrideObstacleAABB(size_t idx,
+                              const std::array<double, 3>& aabb_min,
+                              const std::array<double, 3>& aabb_max) {
+        if (idx < obstacles_.size())
+            obstacles_[idx]->setAABB(aabb_min, aabb_max);
+    }
 
 private:
     double lx_, ly_, lz_;     // 空间最大范围 (m)

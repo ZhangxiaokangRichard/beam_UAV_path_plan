@@ -38,8 +38,9 @@
     <node name="rviz_publisher" pkg="uav_guide_env"
           type="rviz_publisher" output="screen"/>
 
-    <!-- 7. Rviz 3D 可视化（可选，需要图形界面） -->
+    <!-- 7. Rviz 3D 可视化（延迟启动，等待话题就绪） -->
     <node name="rviz" pkg="rviz" type="rviz"
           args="-d $(find uav_guide_env)/config/rviz/beam_dubins_3d.rviz"
+          launch-prefix="bash -c 'sleep 2; exec $0 $@'"
           required="false"/>
 </launch>

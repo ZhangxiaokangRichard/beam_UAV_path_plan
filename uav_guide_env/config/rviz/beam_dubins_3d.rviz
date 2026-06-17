@@ -1,172 +1,385 @@
 Panels:
   - Class: rviz/Displays
+    Help Height: 70
     Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.5
+    Tree Height: 141
   - Class: rviz/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
   - Class: rviz/Tool Properties
+    Expanded: ~
     Name: Tool Properties
-
+    Splitter Ratio: 0.5
+Preferences:
+  PromptSaveOnExit: true
+Toolbars:
+  toolButtonStyle: 2
 Visualization Manager:
+  Class: ""
   Displays:
-    # ── 1. 网格地图（白色网格，以 map 为中心）─────────────────
-    - Class: rviz/Grid
-      Name: Grid
-      Enabled: true
-      Reference Frame: map
-      Plane Cell Count: 100
-      Normal Cell Count: 1
+    - Alpha: 0.5
       Cell Size: 200
-      Line Style: Lines
+      Class: rviz/Grid
       Color: 180; 180; 180
-      Alpha: 0.5
-      Plane: XY
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 1
       Offset:
         X: 5000
         Y: 2500
         Z: 0
-
-    # ── 2. TF 坐标系（显示所有 TF 帧）─────────────────────────
+      Plane: XY
+      Plane Cell Count: 100
+      Reference Frame: map
+      Value: true
     - Class: rviz/TF
-      Name: TF
       Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
       Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        map:
+          Value: true
+        odom:
+          Value: true
+      Marker Alpha: 1
       Marker Scale: 200
-      Show Names: true
-      Show Axes: true
+      Name: TF
       Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          odom:
+            {}
       Update Interval: 0
-
-    # ── 3. 障碍物（灰色半透明 AABB 方块）──────────────────────
+      Value: true
     - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: visualization_marker_array
       Name: Obstacles
-      Enabled: true
-      Topic: /obstacles
+      Namespaces:
+        {}
       Queue Size: 10
-
-    # ── 4. 空间边界（线框）────────────────────────────────────
+      Value: true
     - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: visualization_marker
       Name: EnvBounds
-      Enabled: true
-      Topic: /env/bounds
+      Namespaces:
+        {}
       Queue Size: 10
-
-    # ── 5. UAV 位姿（橙色箭头，大尺寸易见）────────────────────
-    - Class: rviz/Odometry
+      Value: true
+    - Angle Tolerance: 0.10000000149011612
+      Class: rviz/Odometry
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: true
+        Position:
+          Alpha: 0.30000001192092896
+          Color: 204; 51; 204
+          Scale: 1
+          Value: true
+        Value: true
+      Enabled: true
+      Keep: 1
       Name: UAV State
-      Enabled: true
+      Position Tolerance: 0.10000000149011612
+      Queue Size: 10
+      Shape:
+        Alpha: 1
+        Axes Length: 1
+        Axes Radius: 0.10000000149011612
+        Color: 255; 25; 0
+        Head Length: 0.30000001192092896
+        Head Radius: 0.10000000149011612
+        Shaft Length: 1
+        Shaft Radius: 0.05000000074505806
+        Value: Arrow
       Topic: /uav/state
-      Position Tolerance: 0.1
-      Angle Tolerance: 0.1
-      Keep: 1
-      Shape: Arrow
-      Shaft Length: 300
-      Shaft Diameter: 40
-      Head Length: 120
-      Head Diameter: 80
-      Color: 255; 140; 0
-      Alpha: 1.0
-
-    # ── 6. UAV 3D 模型（Mesh 箭头，更直观）────────────────────
+      Unreliable: false
+      Value: true
     - Class: rviz/Marker
-      Name: UAV Model
       Enabled: true
-      Topic: /uav/model
+      Marker Topic: visualization_marker
+      Name: UAV Arrow
+      Namespaces:
+        {}
       Queue Size: 10
-
-    # ── 7. UAV 航迹（紫色线）──────────────────────────────────
-    - Class: rviz/Path
-      Name: UAV Trail
+      Value: true
+    - Class: rviz/Marker
       Enabled: true
-      Topic: /uav/trail
-      Line Style: Lines
-      Line Width: 5.0
-      Color: 148; 112; 219
-      Alpha: 0.8
+      Marker Topic: visualization_marker
+      Name: UAV Sphere
+      Namespaces:
+        {}
+      Queue Size: 10
+      Value: true
+    - Alpha: 0.800000011920929
       Buffer Length: 10000
-
-    # ── 8. 目标位姿（红色箭头）────────────────────────────────
-    - Class: rviz/Odometry
-      Name: Target State
+      Class: rviz/Path
+      Color: 148; 112; 219
       Enabled: true
-      Topic: /target/state
-      Position Tolerance: 0.1
-      Angle Tolerance: 0.1
-      Keep: 1
-      Shape: Arrow
-      Shaft Length: 250
-      Shaft Diameter: 35
-      Head Length: 100
-      Head Diameter: 70
-      Color: 255; 0; 0
-      Alpha: 1.0
-
-    # ── 9. 目标 3D 模型（球体 Marker）─────────────────────────
-    - Class: rviz/Marker
-      Name: Target Model
-      Enabled: true
-      Topic: /target/model
-      Queue Size: 10
-
-    # ── 10. 规划路径（橙色线，粗）─────────────────────────────
-    - Class: rviz/Path
-      Name: Planned Path
-      Enabled: true
-      Topic: /beam_dubins/path
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 5.0
-      Color: 255; 140; 0
-      Alpha: 0.9
+      Line Width: 30
+      Name: UAV Trail
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Queue Size: 10
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic: /uav/trail
+      Unreliable: false
+      Value: true
+    - Angle Tolerance: 0.10000000149011612
+      Class: rviz/Odometry
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: true
+        Position:
+          Alpha: 0.30000001192092896
+          Color: 204; 51; 204
+          Scale: 1
+          Value: true
+        Value: true
+      Enabled: true
+      Keep: 1
+      Name: Target State
+      Position Tolerance: 0.10000000149011612
+      Queue Size: 10
+      Shape:
+        Alpha: 1
+        Axes Length: 1
+        Axes Radius: 0.10000000149011612
+        Color: 255; 25; 0
+        Head Length: 0.30000001192092896
+        Head Radius: 0.10000000149011612
+        Shaft Length: 1
+        Shaft Radius: 0.05000000074505806
+        Value: Arrow
+      Topic: /target/state
+      Unreliable: false
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: visualization_marker
+      Name: Target Sphere
+      Namespaces:
+        {}
+      Queue Size: 10
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: visualization_marker
+      Name: Target Arrow
+      Namespaces:
+        {}
+      Queue Size: 10
+      Value: true
+    - Alpha: 0.8999999761581421
       Buffer Length: 1
-
-    # ── 11. 搜索树（青色线段，半透明）─────────────────────────
+      Class: rviz/Path
+      Color: 255; 140; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 30
+      Name: Planned Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Queue Size: 10
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic: /beam_dubins/path
+      Unreliable: false
+      Value: true
     - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: visualization_marker
       Name: Search Tree
-      Enabled: true
-      Topic: /beam_dubins/search_tree
+      Namespaces:
+        {}
       Queue Size: 10
-
-    # ── 12. 状态文本（白色文字）───────────────────────────────
+      Value: true
     - Class: rviz/Marker
-      Name: Status Text
       Enabled: true
-      Topic: /sim/status_text
+      Marker Topic: visualization_marker
+      Name: Status Text
+      Namespaces:
+        {}
       Queue Size: 10
-
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /env/bounds
+      Name: Marker
+      Namespaces:
+        env_bounds: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /obstacles
+      Name: MarkerArray
+      Namespaces:
+        obstacles: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /target/arrow
+      Name: Target_arrow
+      Namespaces:
+        target_arrow: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /uav/sphere
+      Name: Uav_model
+      Namespaces:
+        uav_sphere: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /uav/model
+      Name: Uav_arrow
+      Namespaces:
+        uav_model: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /target/model
+      Name: Target_model
+      Namespaces:
+        target_model: true
+      Queue Size: 100
+      Value: true
+  Enabled: true
   Global Options:
     Background Color: 255; 255; 255
+    Default Light: true
     Fixed Frame: map
     Frame Rate: 30
-
-  Views:
-    Current:
-      Class: rviz/Orbit
-      Name: Top-Down 2D
-      Target Frame: map
-      Distance: 12000
-      Yaw: 0
-      Pitch: 1.57
-      Focal Point:
-        X: 5000
-        Y: 2500
-        Z: 500
-    Saved:
-      - Class: rviz/Orbit
-        Name: Perspective 3D
-        Target Frame: map
-        Distance: 10000
-        Yaw: 0.785
-        Pitch: 0.785
-        Focal Point:
-          X: 5000
-          Y: 2500
-          Z: 500
-      - Class: rviz/ThirdPersonFollower
-        Name: UAV Chase 3D
-        Target Frame: uav_base_link
-        Distance: 600
-
+  Name: root
   Tools:
     - Class: rviz/MoveCamera
     - Class: rviz/Select
     - Class: rviz/Interact
       Hide Inactive Objects: true
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 23494.17578125
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Field of View: 0.7853981852531433
+      Focal Point:
+        X: 5000
+        Y: 2500
+        Z: 500
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 1.5697963237762451
+      Target Frame: map
+      Yaw: 0
+    Saved:
+      - Class: rviz/Orbit
+        Distance: 10000
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Field of View: 0.7853981852531433
+        Focal Point:
+          X: 5000
+          Y: 2500
+          Z: 500
+        Focal Shape Fixed Size: true
+        Focal Shape Size: 0.05000000074505806
+        Invert Z Axis: false
+        Name: Perspective 3D
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.7850000262260437
+        Target Frame: map
+        Yaw: 0.7850000262260437
+      - Class: rviz/ThirdPersonFollower
+        Distance: 600
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Field of View: 0.7853981852531433
+        Focal Point:
+          X: 0
+          Y: 0
+          Z: 0
+        Focal Shape Fixed Size: true
+        Focal Shape Size: 0.05000000074505806
+        Invert Z Axis: false
+        Name: UAV Chase 3D
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.7853981852531433
+        Target Frame: uav_base_link
+        Yaw: 0.7853981852531433
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 720
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000015800000276fc0200000003fb000000100044006900730070006c006100790073010000003d00000110000000c900fffffffb0000000a005600690065007700730100000153000000de000000a400fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007301000002370000007c0000005c00ffffff000003280000027600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1158
+  X: 122
+  Y: 77

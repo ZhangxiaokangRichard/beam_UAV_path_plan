@@ -59,6 +59,51 @@ std::array<double, 5> TargetTrajectory::positionAt(double t) const
     return staticPos(t);
 }
 
+ChannelWalls TargetTrajectory::computeChannelWalls(
+    const std::array<double, 5>& target_state) const
+{
+    const auto& ch = channel_;
+    double tx = target_state[0];
+    double ty = target_state[1];
+    double tz = target_state[2];
+    double yaw = target_state[3];
+
+    // 通道方向 = 目标航向；缺口垂直航向
+    // 航向左侧方向 = yaw + π/2（北偏西），右侧 = yaw - π/2（北偏东）
+    double left_x  = std::cos(yaw + M_PI / 2.0);  // 左方向 X
+    double left_y  = std::sin(yaw + M_PI / 2.0);  // 左方向 Y
+    double right_x = std::cos(yaw - M_PI / 2.0);  // 右方向 X
+    double right_y = std::sin(yaw - M_PI / 2.0);  // 右方向 Y
+
+    // 墙中心在缺口方向的偏移（含安全边距）
+    double half_gap = ch.inner_width / 2.0 + ch.safe_margin;
+    double wall_half_thick = ch.wall_thickness / 2.0;
+    double wall_half_len   = ch.wall_length / 2.0;
+    double wall_half_h     = ch.wall_height / 2.0;
+
+    // 左墙中心 = 目标 + (半通道宽 + 半墙厚) 向左
+    double lcx = tx + (half_gap + wall_half_thick) * left_x;
+    double lcy = ty + (half_gap + wall_half_thick) * left_y;
+
+    // 右墙中心 = 目标 + (半通道宽 + 半墙厚) 向右
+    double rcx = tx + (half_gap + wall_half_thick) * right_x;
+    double rcy = ty + (half_gap + wall_half_thick) * right_y;
+
+    double wall_cz = ch.wall_z_base + wall_half_h;
+
+    ChannelWalls walls;
+
+    // 左墙 AABB（axis-aligned 近似：墙中心 ± 半尺寸）
+    walls.left_min  = {lcx - wall_half_thick, lcy - wall_half_len, ch.wall_z_base};
+    walls.left_max  = {lcx + wall_half_thick, lcy + wall_half_len, ch.wall_z_base + ch.wall_height};
+
+    // 右墙 AABB
+    walls.right_min = {rcx - wall_half_thick, rcy - wall_half_len, ch.wall_z_base};
+    walls.right_max = {rcx + wall_half_thick, rcy + wall_half_len, ch.wall_z_base + ch.wall_height};
+
+    return walls;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // static：静止目标
 // ═══════════════════════════════════════════════════════════════

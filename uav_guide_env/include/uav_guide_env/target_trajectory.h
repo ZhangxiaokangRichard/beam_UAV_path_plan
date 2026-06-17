@@ -19,6 +19,30 @@
 namespace uav_guide_env {
 
 /**
+ * @struct ChannelParams
+ * @brief 通道障碍物配置（AABB 墙壁，形成引导通道）
+ */
+struct ChannelParams {
+    double inner_width    = 100.0;   // 通道内部宽度（两墙内边间距，m）
+    double wall_length    = 2000.0;  // 墙壁沿通道方向长度（m）
+    double wall_thickness = 2000.0;  // 墙壁垂直通道方向厚度（m）
+    double wall_height    = 1000.0;  // 墙壁高度（m）
+    double safe_margin    = 5.0;     // 安全边距（m）
+    double wall_z_base    = 0.0;     // 墙壁底部 Z（m）
+};
+
+/**
+ * @struct ChannelWalls
+ * @brief 通道两侧墙壁的 AABB（min/max 角点）
+ */
+struct ChannelWalls {
+    std::array<double, 3> left_min;   // 左墙 aabb_min
+    std::array<double, 3> left_max;   // 左墙 aabb_max
+    std::array<double, 3> right_min;  // 右墙 aabb_min
+    std::array<double, 3> right_max;  // 右墙 aabb_max
+};
+
+/**
  * @class TargetTrajectory
  * @brief 动态目标轨迹生成器
  *
@@ -46,6 +70,27 @@ public:
      * @return [x, y, z, yaw, pitch]
      */
     std::array<double, 5> positionAt(double t) const;
+
+    /**
+     * @brief 设置通道障碍物参数
+     */
+    void setChannelParams(const ChannelParams& params) { channel_ = params; }
+
+    /**
+     * @brief 获取通道障碍物参数
+     */
+    const ChannelParams& getChannelParams() const { return channel_; }
+
+    /**
+     * @brief 计算通道两侧墙壁的 AABB
+     * @param target_state  目标当前 5D 位姿 [x, y, z, yaw, pitch]
+     * @return 左右墙的 min/max 角点
+     *
+     * 墙壁沿目标航向延伸（dy=wall_length），
+     * 通道缺口垂直航向（dx=wall_thickness），
+     * 左墙在航向左侧（yaw-π/2 方向），右墙在航向右侧（yaw+π/2 方向）。
+     */
+    ChannelWalls computeChannelWalls(const std::array<double, 5>& target_state) const;
 
     // ── 访问器 ───────────────────────────────────────────────
     const std::string& getType()          const { return traj_type_; }
@@ -79,6 +124,9 @@ private:
     double rt_direction_    = 0.0;     // rad
     double rt_altitude_     = 600.0;   // m
     double rt_lap_speed_    = 30.0;    // m/s
+
+    // ── 通道障碍物 ──
+    ChannelParams channel_;
 };
 
 }  // namespace uav_guide_env

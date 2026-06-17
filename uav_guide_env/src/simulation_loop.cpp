@@ -149,13 +149,14 @@ static visualization_msgs::Marker makeSearchTreeMarker(
     const std::string& frame_id, const ros::Time& stamp)
 {
     visualization_msgs::Marker marker;
-    marker.header.stamp    = stamp;
+    marker.header.stamp    = ros::Time(0);  // 使用最新 TF
     marker.header.frame_id = frame_id;
     marker.ns      = "search_tree";
     marker.id      = 0;
     marker.type    = visualization_msgs::Marker::LINE_LIST;
     marker.action  = visualization_msgs::Marker::ADD;
     marker.scale.x = 2.0;  // 线宽 (m)
+    marker.pose.orientation.w = 1.0;
     marker.color.r = 0.0;
     marker.color.g = 0.55;
     marker.color.b = 0.55;
@@ -270,40 +271,40 @@ int main(int argc, char** argv)
     uav_guide_env::TargetTrajectory target(traj_type, init_pos, traj_params);
     uav_guide_env::ObstacleManager obs_mgr(lx, ly, lz, bm);
 
-    // 从 scenario.yaml 构建障碍物
-    XmlRpc::XmlRpcValue obs_list;
-    if (ros::param::get("/scenario/obstacles", obs_list)) {
-        for (int i = 0; i < obs_list.size(); ++i) {
-            auto& o = obs_list[i];
-            std::string otype = o.hasMember("type") ? std::string(o["type"]) : "static";
-            double ox=0,oy=0,oz=0,dx=100,dy=100,dz=100,sm=5.0;
-            if (o.hasMember("position") && o["position"].size() >= 3) {
-                ox = static_cast<double>(o["position"][0]);
-                oy = static_cast<double>(o["position"][1]);
-                oz = static_cast<double>(o["position"][2]);
-            }
-            if (o.hasMember("size") && o["size"].size() >= 3) {
-                dx = static_cast<double>(o["size"][0]);
-                dy = static_cast<double>(o["size"][1]);
-                dz = static_cast<double>(o["size"][2]);
-            }
-            if (o.hasMember("safe_margin")) sm = static_cast<double>(o["safe_margin"]);
+    // 从 /target/channel/* 读取通道障碍物参数
+    uav_guide_env::ChannelParams ch_params;
+    ros::param::param<double>("/target/channel/inner_width",    ch_params.inner_width,    100.0);
+    ros::param::param<double>("/target/channel/wall_length",    ch_params.wall_length,    2000.0);
+    ros::param::param<double>("/target/channel/wall_thickness", ch_params.wall_thickness, 2000.0);
+    ros::param::param<double>("/target/channel/wall_height",    ch_params.wall_height,    1000.0);
+    ros::param::param<double>("/target/channel/safe_margin",    ch_params.safe_margin,    5.0);
+    ros::param::param<double>("/target/channel/wall_z_base",    ch_params.wall_z_base,    0.0);
+    target.setChannelParams(ch_params);
 
-            if (otype == "dynamic") {
-                double offset_y = 50.0;
-                if (o.hasMember("offset_y")) offset_y = static_cast<double>(o["offset_y"]);
-                // DynamicObstacle with follow mode: 速度设为0，通过 followGoalY 控制
-                auto dyn_obs = std::make_unique<uav_guide_env::DynamicObstacle>(
-                    ox, oy, oz, dx, dy, dz, 0.0, 0.0, 0.0, sm);
-                obs_mgr.addObstacle(std::move(dyn_obs));
-            } else {
-                auto box_obs = std::make_unique<uav_guide_env::BoxObstacle>(
-                    ox, oy, oz, dx, dy, dz, sm);
-                obs_mgr.addObstacle(std::move(box_obs));
-            }
-        }
+    // 创建通道墙壁障碍物（左墙+右墙）
+    {
+        auto state0 = target.positionAt(0.0);
+        auto walls = target.computeChannelWalls(state0);
+        // 左墙
+        auto left_wall = std::make_unique<uav_guide_env::DynamicObstacle>(
+            walls.left_min[0], walls.left_min[1], walls.left_min[2],
+            walls.left_max[0] - walls.left_min[0],
+            walls.left_max[1] - walls.left_min[1],
+            walls.left_max[2] - walls.left_min[2],
+            0.0, 0.0, 0.0, ch_params.safe_margin);
+        obs_mgr.addObstacle(std::move(left_wall));
+        // 右墙
+        auto right_wall = std::make_unique<uav_guide_env::DynamicObstacle>(
+            walls.right_min[0], walls.right_min[1], walls.right_min[2],
+            walls.right_max[0] - walls.right_min[0],
+            walls.right_max[1] - walls.right_min[1],
+            walls.right_max[2] - walls.right_min[2],
+            0.0, 0.0, 0.0, ch_params.safe_margin);
+        obs_mgr.addObstacle(std::move(right_wall));
     }
-    ROS_INFO("[simulation_loop] 障碍物数量: %zu", obs_mgr.getObstacles().size());
+    ROS_INFO("[simulation_loop] 通道墙壁已创建 (inner_width=%.0fm, wall=%0.f×%.0f×%.0fm)",
+             ch_params.inner_width, ch_params.wall_thickness,
+             ch_params.wall_length, ch_params.wall_height);
 
     // ── 仿真状态 ──────────────────────────────────────────────
     SimulationState sim;
@@ -368,32 +369,32 @@ int main(int argc, char** argv)
         // ═══════════════════════════════════════════════════════
         sim.goal_state = target.positionAt(sim.sim_time);
         pub_target_state.publish(
-            makeOdometry(sim.goal_state, 0.0, "odom", "target_link", now));
-        broadcastTF(tf_br, "odom", "target_link", sim.goal_state, now);
+            makeOdometry(sim.goal_state, 0.0, "map", "target_link", now));
+        broadcastTF(tf_br, "map", "target_link", sim.goal_state, now);
 
         // ═══════════════════════════════════════════════════════
-        // 2. 更新动态障碍物（通道墙壁跟随目标 Y）
+        // 2. 更新通道墙壁（跟随目标位置和朝向）
         // ═══════════════════════════════════════════════════════
         {
+            auto walls = target.computeChannelWalls(sim.goal_state);
             auto& obs_list = obs_mgr.getObstacles();
-            for (size_t i = 0; i < obs_list.size(); ++i) {
-                auto* dyn = dynamic_cast<uav_guide_env::DynamicObstacle*>(obs_list[i].get());
-                if (dyn) {
-                    // 从 scenario YAML 读取偏移参数（简化：硬编码通道墙壁逻辑）
-                    // 左墙 i=0: 内边 y = goal_y - 50, 墙壁向外延伸
-                    // 右墙 i=1: 内边 y = goal_y + 50
-                    double goal_y = sim.goal_state[1];
-                    if (i == 0) {
-                        // 左墙：y 范围 goal_y-50-wallsiz_y → goal_y-50
-                        double wall_dy = obs_list[i]->getSize()[1];
-                        dyn->followGoalY(goal_y, -50.0 - wall_dy);
-                    } else if (i == 1) {
-                        // 右墙：y 范围 goal_y+50 → goal_y+50+wallsiz_y
-                        dyn->followGoalY(goal_y, 50.0);
-                    } else {
-                        dyn->update(sim.sim_time);
-                    }
+            if (obs_list.size() >= 2) {
+                // 左墙（索引 0）
+                auto* left = dynamic_cast<uav_guide_env::DynamicObstacle*>(obs_list[0].get());
+                if (left) {
+                    left->followGoalY(walls.left_min[1], 0.0);  // 直接设 Y
+                    // 更新全部 AABB min/max
+                    left->update(0.0);  // 触发 AABB 重算（不够精确，手动覆盖）
                 }
+                // 右墙（索引 1）
+                auto* right = dynamic_cast<uav_guide_env::DynamicObstacle*>(obs_list[1].get());
+                if (right) {
+                    right->followGoalY(walls.right_min[1], 0.0);
+                    right->update(0.0);
+                }
+                // 直接把 AABB 覆盖为计算值（绕过 followGoalY 的 Y 轴局限）
+                obs_mgr.overrideObstacleAABB(0, walls.left_min, walls.left_max);
+                obs_mgr.overrideObstacleAABB(1, walls.right_min, walls.right_max);
             }
         }
 
@@ -459,7 +460,7 @@ int main(int argc, char** argv)
                         sim.best_path.push_back({pp.x, pp.y, pp.z, pp.yaw});
                     }
                     // 发布搜索树 Marker（基于路径近似）
-                    auto tree_marker = makeSearchTreeMarker(sim.best_path, "odom", now);
+                    auto tree_marker = makeSearchTreeMarker(sim.best_path, "map", now);
                     pub_bd_tree.publish(tree_marker);
 
                     ROS_INFO("[simulation_loop] step=%d: 规划成功 cost=%.1f path=%zu nodes=%d depth=%d time=%.1fms %s",
@@ -481,7 +482,7 @@ int main(int argc, char** argv)
         // 5. 发布规划路径和代价（如果有）
         // ═══════════════════════════════════════════════════════
         if (!sim.best_path.empty()) {
-            auto path_msg = makePath(sim.best_path, "odom", now);
+            auto path_msg = makePath(sim.best_path, "map", now);
             pub_bd_path.publish(path_msg);
 
             std_msgs::Float64 cost_msg;
@@ -501,8 +502,8 @@ int main(int argc, char** argv)
         // 7. 发布 UAV 状态和航迹
         // ═══════════════════════════════════════════════════════
         pub_uav_state.publish(
-            makeOdometry(sim.uav_pose, cruise_speed, "odom", "uav_base_link", now));
-        broadcastTF(tf_br, "odom", "uav_base_link", sim.uav_pose, now);
+            makeOdometry(sim.uav_pose, cruise_speed, "map", "uav_base_link", now));
+        broadcastTF(tf_br, "map", "uav_base_link", sim.uav_pose, now);
 
         // 追加航迹
         sim.trail_x.push_back(sim.uav_pose[0]);
@@ -513,7 +514,7 @@ int main(int argc, char** argv)
         {
             nav_msgs::Path trail_msg;
             trail_msg.header.stamp    = now;
-            trail_msg.header.frame_id = "odom";
+            trail_msg.header.frame_id = "map";
             for (size_t i = 0; i < sim.trail_x.size(); ++i) {
                 geometry_msgs::PoseStamped ps;
                 ps.header = trail_msg.header;

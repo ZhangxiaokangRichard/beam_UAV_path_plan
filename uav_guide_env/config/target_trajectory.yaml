@@ -19,7 +19,7 @@ trajectories:
   racetrack:
     straight_length_m: 1000.0               # 直线段长度 (m)
     turn_radius_m: 300.0                    # 弯道半径 (m)
-    direction_deg: 0.0                      # 起始方向 (°)
+    direction_deg: 90.0                     # 起始方向 (°)
     altitude_m: 600.0                       # 飞行高度 (m)
     lap_speed_mps: 30.0                     # 绕圈速度 (m/s)
 
@@ -27,3 +27,15 @@ trajectories:
     center: [8000.0, 2500.0, 600.0]        # 圆心 [x, y, z]
     radius_m: 500.0                         # 半径 (m)
     angular_speed_dps: 5.0                  # 角速度 (°/s)
+
+# ═══════════════════════════════════════════════════════════════
+# 通道障碍物参数（从 scenario.yaml 迁移至此）
+# 两个 AABB 墙壁形成引导通道，始终跟随目标位置和朝向
+# ═══════════════════════════════════════════════════════════════
+channel:
+  inner_width: 100.0            # 通道内部宽度（两墙内边间距，m）
+  wall_length: 2000.0           # 墙壁沿通道方向的长度（dy, m）
+  wall_thickness: 2000.0        # 墙壁垂直通道方向的厚度（dx, m）
+  wall_height: 1000.0           # 墙壁高度（dz, m）
+  safe_margin: 5.0              # 安全边距（m）
+  wall_z_base: 0.0              # 墙壁底部 Z 坐标（m）

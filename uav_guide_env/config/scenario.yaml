@@ -16,25 +16,7 @@ space:
   lz: 1000.0                      # Z 范围 (m)
   boundary_margin: 50.0           # 边界安全距离 (m)
 
-# ── 障碍物定义 ────────────────────────────────────────────
-obstacles:
-  # 左墙（通道下边界 y < 2450 被封锁）
-  - id: 0
-    type: "dynamic"               # dynamic=动态跟随目标 Y
-    position: [3000.0, 450.0, 0.0]  # 初始角点 [x, y, z]
-    size: [2000.0, 2000.0, 1000.0]  # [dx, dy, dz]
-    safe_margin: 5.0
-    follow: "goal_y_neg"          # 跟随目标 Y 负方向偏移
-    offset_y: -50.0               # 内边 = goal_y - 50
-
-  # 右墙（通道上边界 y > 2550 被封锁）
-  - id: 1
-    type: "dynamic"
-    position: [3000.0, 2550.0, 0.0]
-    size: [2000.0, 2000.0, 1000.0]
-    safe_margin: 5.0
-    follow: "goal_y_pos"
-    offset_y: 50.0                # 内边 = goal_y + 50
+# ── 注意：障碍物参数已迁移到 target_trajectory.yaml → channel 段 ──
 
 # ── 可选：3D 通道场景（Phase 4a 启用）───────────────────
 # 3d_obstacles:
