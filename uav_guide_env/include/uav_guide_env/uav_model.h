@@ -77,7 +77,7 @@ public:
      */
     void advanceAlongPath(std::array<double, 5>& pose,
                           const std::vector<std::array<double, 4>>& path,
-                          int& path_ptr, size_t& last_path_id,
+                          int& path_ptr, size_t& last_path_gen,
                           const std::array<double, 5>& goal,
                           double distance) const;
 

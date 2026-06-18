@@ -3,39 +3,43 @@
 # 从 Python config/target_trajectory.json 迁移
 # ═══════════════════════════════════════════════════════════════
 
-initial_position: [4000.0, 2500.0, 600.0]  # [x, y, z]
-initial_heading_deg: 0                      # 初始航向 (°)
-trajectory_type: "line"                     # static / line / racetrack / circle
+initial_position: [3000.0, 1500.0, 600.0]  # [x, y, z]
+# initial_heading_deg: 90                      # 初始航向 (°)
+trajectory_type: "circle"                     # static / line / racetrack / circle
 
 trajectories:
   static:
     speed_mps: 0
 
   line:
-    direction_deg: 90                       # 运动方向 (°)，90=向北
+    direction_deg: 225.0           # 运动方向 (°)：0=北+Y，90=东+X，180=南-Y，270=西-X
     speed_mps: 20.0                         # 速度 (m/s)
     length_m: 4000.0                        # 最大行程 (m)
 
   racetrack:
     straight_length_m: 1000.0               # 直线段长度 (m)
     turn_radius_m: 300.0                    # 弯道半径 (m)
-    direction_deg: 90.0                     # 起始方向 (°)
+    direction_deg: 90.0           # 起始方向 (°)：0=北，90=东
     altitude_m: 600.0                       # 飞行高度 (m)
     lap_speed_mps: 30.0                     # 绕圈速度 (m/s)
 
   circle:
-    center: [8000.0, 2500.0, 600.0]        # 圆心 [x, y, z]
-    radius_m: 500.0                         # 半径 (m)
+    center: [2000.0, 1500.0, 600.0]        # 圆心 [x, y, z]
+    radius_m: 1000.0                         # 半径 (m)
     angular_speed_dps: 5.0                  # 角速度 (°/s)
 
 # ═══════════════════════════════════════════════════════════════
-# 通道障碍物参数（从 scenario.yaml 迁移至此）
-# 两个 AABB 墙壁形成引导通道，始终跟随目标位置和朝向
+# 终端逼近约束（替代通道墙壁方案，见 alg_replan.md 方案 A）
 # ═══════════════════════════════════════════════════════════════
-channel:
-  inner_width: 100.0            # 通道内部宽度（两墙内边间距，m）
-  wall_length: 2000.0           # 墙壁沿通道方向的长度（dy, m）
-  wall_thickness: 2000.0        # 墙壁垂直通道方向的厚度（dx, m）
-  wall_height: 1000.0           # 墙壁高度（dz, m）
-  safe_margin: 5.0              # 安全边距（m）
-  wall_z_base: 0.0              # 墙壁底部 Z 坐标（m）
+approach_distance: 1000.0       # 终端直飞逼近距离 L (m)：规划到目标后方 L 处
+
+# ═══════════════════════════════════════════════════════════════
+# [已废弃] 通道障碍物参数 — 由 approach_distance 替代
+# ═══════════════════════════════════════════════════════════════
+# channel:
+#   inner_width: 150.0
+#   wall_length: 1000.0
+#   wall_thickness: 100.0
+#   wall_height: 1000.0
+#   safe_margin: 5.0
+#   wall_z_base: 0.0

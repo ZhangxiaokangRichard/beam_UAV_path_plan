@@ -186,6 +186,18 @@ static bool handle_plan_path(
              req.goal[3] * 180.0 / M_PI,
              req.obstacles.size());
 
+    // ── 诊断：打印第一个障碍物 AABB ──────────────────────────
+    for (size_t i = 0; i < req.obstacles.size() && i < 3; ++i) {
+        const auto& o = req.obstacles[i];
+        ROS_INFO("[planner_server]   障碍物#%zu: min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) size=(%.0f×%.0f×%.0f)m",
+                 i,
+                 o.aabb_min[0], o.aabb_min[1], o.aabb_min[2],
+                 o.aabb_max[0], o.aabb_max[1], o.aabb_max[2],
+                 o.aabb_max[0]-o.aabb_min[0],
+                 o.aabb_max[1]-o.aabb_min[1],
+                 o.aabb_max[2]-o.aabb_min[2]);
+    }
+
     // ── 1. 消息 → C++ 结构体 ─────────────────────────────────
     auto plan_req = ros_to_request(req);
 

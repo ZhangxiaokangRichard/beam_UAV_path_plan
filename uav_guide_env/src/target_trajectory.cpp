@@ -23,9 +23,10 @@ TargetTrajectory::TargetTrajectory(const std::string& traj_type,
     : traj_type_(traj_type)
     , init_pos_(init_pos)
 {
-    // 根据轨迹类型解析参数
+    // 根据轨迹类型解析参数（YAML 角度：0°=北+Y，90°=东+X，180°=南-Y）
     if (traj_type == "line") {
-        line_direction_ = params[0] * M_PI / 180.0;  // 角度→弧度
+        double nav_deg = params[0];
+        line_direction_ = (90.0 - nav_deg) * M_PI / 180.0;  // 导航→数学坐标
         line_speed_     = params[1];
         line_length_    = params[2];
     } else if (traj_type == "circle") {
@@ -37,7 +38,8 @@ TargetTrajectory::TargetTrajectory(const std::string& traj_type,
     } else if (traj_type == "racetrack") {
         rt_straight_len_ = params[0];
         rt_turn_radius_  = params[1];
-        rt_direction_    = params[2] * M_PI / 180.0;
+        double nav_deg = params[2];
+        rt_direction_    = (90.0 - nav_deg) * M_PI / 180.0;
         rt_altitude_     = params[3];
         rt_lap_speed_    = params[4];
     }
@@ -69,6 +71,10 @@ ChannelWalls TargetTrajectory::computeChannelWalls(
     double yaw = target_state[3];
 
     // 通道方向 = 目标航向；缺口垂直航向
+    // 墙壁设计（以目标朝北 yaw=π/2 为例）：
+    //   - 通道沿 Y 轴（航向方向），墙壁长 wall_length
+    //   - 缺口沿 X 轴（垂直航向），墙壁厚 wall_thickness
+    //   - 左墙在西 (-X)，右墙在东 (+X)，目标居中
     // 航向左侧方向 = yaw + π/2（北偏西），右侧 = yaw - π/2（北偏东）
     double left_x  = std::cos(yaw + M_PI / 2.0);  // 左方向 X
     double left_y  = std::sin(yaw + M_PI / 2.0);  // 左方向 Y
@@ -92,14 +98,25 @@ ChannelWalls TargetTrajectory::computeChannelWalls(
     double wall_cz = ch.wall_z_base + wall_half_h;
 
     ChannelWalls walls;
+    double sm = ch.safe_margin;
 
-    // 左墙 AABB（axis-aligned 近似：墙中心 ± 半尺寸）
-    walls.left_min  = {lcx - wall_half_thick, lcy - wall_half_len, ch.wall_z_base};
-    walls.left_max  = {lcx + wall_half_thick, lcy + wall_half_len, ch.wall_z_base + ch.wall_height};
+    // ── 计算 AABB 半尺寸（投影到世界 XY 轴）─────────────────
+    // wall_thickness 沿缺口方向（垂直航向），wall_length 沿通道方向（航向）
+    // 将正交方向的半尺寸投影到世界 XY 坐标，支持任意航向
+    double hw = wall_half_thick + sm;   // 缺口方向半尺寸（含安全边距）
+    double hl = wall_half_len   + sm;   // 通道方向半尺寸（含安全边距）
+    double abs_sin = std::abs(std::sin(yaw));
+    double abs_cos = std::abs(std::cos(yaw));
+    double hx = hw * abs_sin + hl * abs_cos;  // AABB X 半尺寸
+    double hy = hw * abs_cos + hl * abs_sin;  // AABB Y 半尺寸
+
+    // 左墙 AABB（墙中心 ± 半尺寸）
+    walls.left_min  = {lcx - hx, lcy - hy, ch.wall_z_base - sm};
+    walls.left_max  = {lcx + hx, lcy + hy, ch.wall_z_base + ch.wall_height + sm};
 
     // 右墙 AABB
-    walls.right_min = {rcx - wall_half_thick, rcy - wall_half_len, ch.wall_z_base};
-    walls.right_max = {rcx + wall_half_thick, rcy + wall_half_len, ch.wall_z_base + ch.wall_height};
+    walls.right_min = {rcx - hx, rcy - hy, ch.wall_z_base - sm};
+    walls.right_max = {rcx + hx, rcy + hy, ch.wall_z_base + ch.wall_height + sm};
 
     return walls;
 }
@@ -119,11 +136,12 @@ std::array<double, 5> TargetTrajectory::staticPos(double /*t*/) const
 
 std::array<double, 5> TargetTrajectory::linePos(double t) const
 {
+    // line_direction_ 已是数学坐标弧度（0=东+X, π/2=北+Y）
     double dist = std::min(line_speed_ * t, line_length_);
     double x = init_pos_[0] + dist * std::cos(line_direction_);
     double y = init_pos_[1] + dist * std::sin(line_direction_);
     double z = init_pos_[2];
-    double yaw = line_direction_;
+    double yaw = line_direction_;  // 输出数学坐标 yaw，与系统其他部分一致
     return {x, y, z, yaw, 0.0};
 }
 

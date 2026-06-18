@@ -88,7 +88,7 @@ double BeamDubins::search(std::vector<Waypoint>& out_path,
             if (d % cfg_.dubins_shot_interval == 0) {
                 std::vector<Waypoint> shot_path;
                 double cost = dubins_.best_path(&node.pos.x, scorer_->get_goal_ptr(), shot_path);
-                if (cost > 0) {
+                if (cost > 0 && dubins_.is_path_safe(shot_path)) {
                     double total_cost = node.g + cost;
                     if (total_cost < best_cost_) {
                         best_cost_ = total_cost;
@@ -114,7 +114,9 @@ double BeamDubins::search(std::vector<Waypoint>& out_path,
         }
 
         // ── 将新节点加入全局节点列表 ──
+        int base_idx = static_cast<int>(all_nodes_.size());
         for (auto& [nd, _] : candidates) {
+            nd.all_nodes_idx = base_idx++;
             all_nodes_.push_back(nd);
         }
 
@@ -157,16 +159,16 @@ double BeamDubins::search(std::vector<Waypoint>& out_path,
         return best_cost_;
     }
 
-    // 未到达目标：尝试从 best_node 到目标的 Dubins 连接
+    // 未到达目标：尝试从 best_node 到目标的 Dubins 连接（需碰撞检查）
     if (best_node_ != nullptr) {
         std::vector<Waypoint> partial;
         double cost = dubins_.best_path(&best_node_->pos.x, scorer_->get_goal_ptr(), partial);
-        if (cost > 0) {
+        if (cost > 0 && dubins_.is_path_safe(partial)) {
             out_path = build_path(*best_node_);
             out_path.insert(out_path.end(), partial.begin(), partial.end());
             return best_node_->g + cost;
         }
-        // Dubins 不连通 → 仅返回已探索部分
+        // Dubins 不可达或不安全 → 仅返回已探索部分
         out_path = build_path(*best_node_);
         return best_node_->g;
     }
@@ -197,7 +199,7 @@ bool BeamDubins::plan_step(const double* goal)
         if (depth_ % cfg_.dubins_shot_interval == 0) {
             std::vector<Waypoint> shot_path;
             double cost = dubins_.best_path(&node.pos.x, goal, shot_path);
-            if (cost > 0) {
+            if (cost > 0 && dubins_.is_path_safe(shot_path)) {
                 double total_cost = node.g + cost;
                 if (total_cost < best_cost_) {
                     best_cost_ = total_cost;
@@ -223,7 +225,9 @@ bool BeamDubins::plan_step(const double* goal)
     }
 
     // 加入全局列表
+    int base_idx = static_cast<int>(all_nodes_.size());
     for (auto& [nd, _] : candidates) {
+        nd.all_nodes_idx = base_idx++;
         all_nodes_.push_back(nd);
     }
 
@@ -278,6 +282,7 @@ void BeamDubins::reset_from_impl(const double* pos)
 
     all_nodes_.clear();
     all_nodes_.push_back(root);
+    all_nodes_.back().all_nodes_idx = 0;  // 根节点在 all_nodes_ 中的索引为 0
 
     depth_          = 0;
     best_node_      = &all_nodes_.back();  // 指向 all_nodes_ 中的根节点
@@ -329,10 +334,7 @@ BeamNode BeamDubins::extend(const BeamNode& parent, const DubinsPrimitive& prim,
     child.pos.yaw   = last_wp.yaw;
     child.pos.pitch = last_wp.pitch;  // Phase 1: 0.0
 
-    child.parent_idx = static_cast<int>(all_nodes_.size()) - 1;  // 父节点在 all_nodes_ 中的位置
-    // 注意：这里假定父节点是 all_nodes_ 中最后添加的
-    // 实际使用时由调用方负责维护索引关系
-    // Phase 1 简化：使用偏移量
+    child.parent_idx = parent.all_nodes_idx;  // 使用父节点在 all_nodes_ 中的真实索引
 
     child.branch    = prim.waypoints;  // 复制基元的路径点
     child.g         = parent.g + prim.arc_length;

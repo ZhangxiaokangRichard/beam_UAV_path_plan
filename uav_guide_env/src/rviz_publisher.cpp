@@ -1,17 +1,14 @@
 /**
  * @file rviz_publisher.cpp
- * @brief Rviz 3D 可视化发布节点（Phase 3）
- *
- * 从设计文档 ros_design.md §5.3 迁移。
+ * @brief Rviz 3D 可视化发布节点
  *
  * 功能：
- *  1. 发布障碍物 MarkerArray（半透明 AABB 方块，1Hz 更新）
+ *  1. [已废弃] 障碍物 MarkerArray — 由 approach_distance + 虚拟目标替代
  *  2. 发布空间边界 Marker（线框，latched）
  *  3. 订阅并增强 UAV/目标/路径等可视化主题
  *
  * 设计要点：
- *  - 障碍物 Marker 从 /scenario/obstacles 参数初始化
- *  - 动态障碍物根据当前目标 Y 坐标更新（订阅 /target/state）
+ *  - 障碍物渲染已移除，UAV 通过虚拟目标实现终端逼近约束
  *  - 空间边界从 /space/* 参数构建
  */
 
@@ -42,11 +39,21 @@ struct VizState {
     double channel_wall_z_base    = 0.0;
     double channel_safe_margin    = 5.0;
 
-    // 当前目标状态（用于计算墙壁位置）
+    // 默认位置（从 YAML 参数加载，无仿真时使用）
+    double uav_start_x   = 2000.0;
+    double uav_start_y   = 1000.0;
+    double uav_start_z   = 500.0;
+    double uav_start_yaw = M_PI / 2.0;
+    double target_init_x   = 4000.0;
+    double target_init_y   = 2500.0;
+    double target_init_z   = 600.0;
+    double target_init_yaw = M_PI / 2.0;
+
+    // 当前目标状态（用于计算墙壁位置，仿真运行时更新）
     double target_x   = 4000.0;
     double target_y   = 2500.0;
     double target_z   = 600.0;
-    double target_yaw = M_PI / 2.0;  // 默认朝北
+    double target_yaw = M_PI / 2.0;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -344,8 +351,9 @@ static visualization_msgs::Marker makeTargetArrowMarker(
 // 默认 Marker（无仿真数据时的备用显示）
 // ═══════════════════════════════════════════════════════════════
 
-/// 默认 UAV 箭头 — 起始位置 (2000, 1000, 500)，朝北 (yaw=π/2)
-static visualization_msgs::Marker makeDefaultUavMarker()
+/// 默认 UAV 箭头 — 使用参数指定位置
+static visualization_msgs::Marker makeDefaultUavMarker(
+    double x, double y, double z, double yaw)
 {
     visualization_msgs::Marker m;
     m.header.stamp    = ros::Time(0);
@@ -354,7 +362,7 @@ static visualization_msgs::Marker makeDefaultUavMarker()
     m.id      = 0;
     m.type    = visualization_msgs::Marker::ARROW;
     m.action  = visualization_msgs::Marker::ADD;
-    double x = 2000.0, y = 1000.0, z = 500.0, yaw = M_PI / 2.0, len = 600.0;
+    double len = 600.0;
     m.points.resize(2);
     m.points[0].x = x;          m.points[0].y = y;          m.points[0].z = z;
     m.points[1].x = x + len * std::cos(yaw);
@@ -367,7 +375,8 @@ static visualization_msgs::Marker makeDefaultUavMarker()
     return m;
 }
 
-static visualization_msgs::Marker makeDefaultUavSphere()
+static visualization_msgs::Marker makeDefaultUavSphere(
+    double x, double y, double z)
 {
     visualization_msgs::Marker m;
     m.header.stamp    = ros::Time(0);
@@ -375,7 +384,7 @@ static visualization_msgs::Marker makeDefaultUavSphere()
     m.ns = "uav_sphere";  m.id = 0;
     m.type = visualization_msgs::Marker::SPHERE;
     m.action = visualization_msgs::Marker::ADD;
-    m.pose.position.x = 2000.0;  m.pose.position.y = 1000.0;  m.pose.position.z = 500.0;
+    m.pose.position.x = x;  m.pose.position.y = y;  m.pose.position.z = z;
     m.pose.orientation.w = 1.0;
     m.scale.x = 100.0;  m.scale.y = 100.0;  m.scale.z = 100.0;
     m.color.r = 1.0f;  m.color.g = 0.45f;  m.color.b = 0.0f;  m.color.a = 1.0f;
@@ -383,8 +392,9 @@ static visualization_msgs::Marker makeDefaultUavSphere()
     return m;
 }
 
-/// 默认目标球体 — 起始位置 (4000, 2500, 600)
-static visualization_msgs::Marker makeDefaultTargetMarker()
+/// 默认目标球体 — 使用参数指定位置
+static visualization_msgs::Marker makeDefaultTargetMarker(
+    double x, double y, double z)
 {
     visualization_msgs::Marker m;
     m.header.stamp    = ros::Time(0);
@@ -392,7 +402,7 @@ static visualization_msgs::Marker makeDefaultTargetMarker()
     m.ns = "target_model";  m.id = 0;
     m.type = visualization_msgs::Marker::SPHERE;
     m.action = visualization_msgs::Marker::ADD;
-    m.pose.position.x = 4000.0;  m.pose.position.y = 2500.0;  m.pose.position.z = 600.0;
+    m.pose.position.x = x;  m.pose.position.y = y;  m.pose.position.z = z;
     m.pose.orientation.w = 1.0;
     m.scale.x = 120.0;  m.scale.y = 120.0;  m.scale.z = 120.0;
     m.color.r = 1.0f;  m.color.g = 0.15f;  m.color.b = 0.15f;  m.color.a = 0.9f;
@@ -400,8 +410,9 @@ static visualization_msgs::Marker makeDefaultTargetMarker()
     return m;
 }
 
-/// 默认目标箭头 — 朝北
-static visualization_msgs::Marker makeDefaultTargetArrow()
+/// 默认目标箭头 — 使用参数指定位置和朝向
+static visualization_msgs::Marker makeDefaultTargetArrow(
+    double x, double y, double z, double yaw)
 {
     visualization_msgs::Marker m;
     m.header.stamp    = ros::Time(0);
@@ -409,7 +420,7 @@ static visualization_msgs::Marker makeDefaultTargetArrow()
     m.ns = "target_arrow";  m.id = 0;
     m.type = visualization_msgs::Marker::ARROW;
     m.action = visualization_msgs::Marker::ADD;
-    double x = 4000.0, y = 2500.0, z = 600.0, yaw = M_PI / 2.0, len = 400.0;
+    double len = 400.0;
     m.points.resize(2);
     m.points[0].x = x;          m.points[0].y = y;          m.points[0].z = z;
     m.points[1].x = x + len * std::cos(yaw);
@@ -445,16 +456,39 @@ int main(int argc, char** argv)
     ROS_INFO("[rviz_publisher] 空间参数: %.0f×%.0f×%.0f margin=%.0f",
              state.lx, state.ly, state.lz, state.margin);
 
-    // ── 加载通道障碍物参数（从 /target/channel/*）─────────
-    ros::param::param<double>("/target/channel/inner_width",    state.channel_inner_width,    100.0);
-    ros::param::param<double>("/target/channel/wall_length",    state.channel_wall_length,    2000.0);
-    ros::param::param<double>("/target/channel/wall_thickness", state.channel_wall_thickness, 2000.0);
-    ros::param::param<double>("/target/channel/wall_height",    state.channel_wall_height,    1000.0);
-    ros::param::param<double>("/target/channel/wall_z_base",    state.channel_wall_z_base,    0.0);
-    ros::param::param<double>("/target/channel/safe_margin",    state.channel_safe_margin,    5.0);
-    ROS_INFO("[rviz_publisher] 通道参数: inner_width=%.0f wall=%.0f×%.0f×%.0f",
-             state.channel_inner_width, state.channel_wall_thickness,
-             state.channel_wall_length, state.channel_wall_height);
+    // [已废弃] 通道障碍物参数（由 approach_distance + 虚拟目标替代）
+    // ros::param::param<double>("/target/channel/inner_width",    state.channel_inner_width,    100.0);
+    // ros::param::param<double>("/target/channel/wall_length",    state.channel_wall_length,    2000.0);
+    // ros::param::param<double>("/target/channel/wall_thickness", state.channel_wall_thickness, 2000.0);
+    // ros::param::param<double>("/target/channel/wall_height",    state.channel_wall_height,    1000.0);
+    // ros::param::param<double>("/target/channel/wall_z_base",    state.channel_wall_z_base,    0.0);
+    // ros::param::param<double>("/target/channel/safe_margin",    state.channel_safe_margin,    5.0);
+    // ROS_INFO("[rviz_publisher] 通道参数: inner_width=%.0f wall=%.0f×%.0f×%.0f",
+    //          state.channel_inner_width, state.channel_wall_thickness,
+    //          state.channel_wall_length, state.channel_wall_height);
+
+    // ── 加载初始位置（与 YAML 同步，无仿真时使用）─────────
+    std::vector<double> start_vec;
+    if (ros::param::get("/scenario/start", start_vec) && start_vec.size() >= 5) {
+        state.uav_start_x   = start_vec[0];
+        state.uav_start_y   = start_vec[1];
+        state.uav_start_z   = start_vec[2];
+        state.uav_start_yaw = start_vec[3];
+    }
+    std::vector<double> init_pos_vec;
+    if (ros::param::get("/target/initial_position", init_pos_vec) && init_pos_vec.size() >= 3) {
+        state.target_init_x = init_pos_vec[0];
+        state.target_init_y = init_pos_vec[1];
+        state.target_init_z = init_pos_vec[2];
+    }
+    // 同步当前目标值为初始值（仿真数据到达前使用）
+    state.target_x   = state.target_init_x;
+    state.target_y   = state.target_init_y;
+    state.target_z   = state.target_init_z;
+    state.target_yaw = state.target_init_yaw;
+    ROS_INFO("[rviz_publisher] 默认位置: UAV=(%.0f,%.0f,%.0f) Target=(%.0f,%.0f,%.0f)",
+             state.uav_start_x, state.uav_start_y, state.uav_start_z,
+             state.target_init_x, state.target_init_y, state.target_init_z);
 
     // ── 订阅 ──────────────────────────────────────────────────
     ros::Subscriber sub_target = nh.subscribe<nav_msgs::Odometry>(
@@ -466,8 +500,9 @@ int main(int argc, char** argv)
         "/uav/state", 10, uavStateCallback);
 
     // ── 发布 ──────────────────────────────────────────────────
-    ros::Publisher pub_obstacles   = nh.advertise<visualization_msgs::MarkerArray>(
-        "/obstacles", 10, true);  // latched
+    // [已废弃] 障碍物 Publisher（通道墙壁由 approach_distance + 虚拟目标替代）
+    // ros::Publisher pub_obstacles   = nh.advertise<visualization_msgs::MarkerArray>(
+    //     "/obstacles", 10, true);  // latched
     ros::Publisher pub_bounds      = nh.advertise<visualization_msgs::Marker>(
         "/env/bounds", 10, true); // latched
     ros::Publisher pub_status_text = nh.advertise<visualization_msgs::Marker>(
@@ -497,41 +532,10 @@ int main(int argc, char** argv)
             static int tick_count = 0;
             tick_count++;
 
-            // ── 障碍物 MarkerArray（通道墙壁，跟随目标）────────
-            visualization_msgs::MarkerArray obs_array;
-            {
-                double hw = state.channel_wall_thickness / 2.0;
-                double hl = state.channel_wall_length    / 2.0;
-                double hh = state.channel_wall_height    / 2.0;
-                double gap2 = state.channel_inner_width  / 2.0;
-                double sm  = state.channel_safe_margin;
-                double tx = state.target_x, ty = state.target_y;
-                double tz = state.channel_wall_z_base + hh;
-                double yaw = state.target_yaw;
-
-                // 左方向 = yaw+π/2 (北偏西)，右方向 = yaw-π/2 (北偏东)
-                double lx = std::cos(yaw + M_PI / 2.0);
-                double ly = std::sin(yaw + M_PI / 2.0);
-                double rx = std::cos(yaw - M_PI / 2.0);
-                double ry = std::sin(yaw - M_PI / 2.0);
-
-                double lcx = tx + (gap2 + hw + sm) * lx;
-                double lcy = ty + (gap2 + hw + sm) * ly;
-                double rcx = tx + (gap2 + hw + sm) * rx;
-                double rcy = ty + (gap2 + hw + sm) * ry;
-
-                obs_array.markers.push_back(
-                    makeObstacleMarker(0, lcx, lcy, tz,
-                        state.channel_wall_thickness + 2.0*sm,
-                        state.channel_wall_length    + 2.0*sm,
-                        state.channel_wall_height    + 2.0*sm));
-                obs_array.markers.push_back(
-                    makeObstacleMarker(1, rcx, rcy, tz,
-                        state.channel_wall_thickness + 2.0*sm,
-                        state.channel_wall_length    + 2.0*sm,
-                        state.channel_wall_height    + 2.0*sm));
-            }
-            pub_obstacles.publish(obs_array);
+            // [已废弃] 通道墙壁 MarkerArray（由 approach_distance + 虚拟目标替代）
+            // visualization_msgs::MarkerArray obs_array;
+            // { ... }
+            // pub_obstacles.publish(obs_array);
 
             // ── 状态文本 Marker ───────────────────────────────
             auto text_marker = makeStatusTextMarker(g_status_text);
@@ -542,8 +546,10 @@ int main(int argc, char** argv)
                 pub_uav_model.publish(makeUavModelMarker(g_last_uav_odom));
                 pub_uav_sphere.publish(makeUavSphereMarker(g_last_uav_odom));
             } else {
-                pub_uav_model.publish(makeDefaultUavMarker());
-                pub_uav_sphere.publish(makeDefaultUavSphere());
+                pub_uav_model.publish(makeDefaultUavMarker(
+                    state.uav_start_x, state.uav_start_y, state.uav_start_z, state.uav_start_yaw));
+                pub_uav_sphere.publish(makeDefaultUavSphere(
+                    state.uav_start_x, state.uav_start_y, state.uav_start_z));
             }
 
             // ── 目标 3D 模型 Marker（红色球体 + 箭头）─────
@@ -551,8 +557,10 @@ int main(int argc, char** argv)
                 pub_target_model.publish(makeTargetModelMarker(g_last_target_odom));
                 pub_target_arrow.publish(makeTargetArrowMarker(g_last_target_odom));
             } else {
-                pub_target_model.publish(makeDefaultTargetMarker());
-                pub_target_arrow.publish(makeDefaultTargetArrow());
+                pub_target_model.publish(makeDefaultTargetMarker(
+                    state.target_init_x, state.target_init_y, state.target_init_z));
+                pub_target_arrow.publish(makeDefaultTargetArrow(
+                    state.target_init_x, state.target_init_y, state.target_init_z, state.target_init_yaw));
             }
 
             ROS_INFO_THROTTLE(5.0, "[rviz_publisher] 1Hz tick#%d: has_uav=%d has_target=%d tgt=(%.0f,%.0f) yaw=%.1f°",
@@ -568,15 +576,19 @@ int main(int argc, char** argv)
                 pub_uav_model.publish(makeUavModelMarker(g_last_uav_odom));
                 pub_uav_sphere.publish(makeUavSphereMarker(g_last_uav_odom));
             } else {
-                pub_uav_model.publish(makeDefaultUavMarker());
-                pub_uav_sphere.publish(makeDefaultUavSphere());
+                pub_uav_model.publish(makeDefaultUavMarker(
+                    state.uav_start_x, state.uav_start_y, state.uav_start_z, state.uav_start_yaw));
+                pub_uav_sphere.publish(makeDefaultUavSphere(
+                    state.uav_start_x, state.uav_start_y, state.uav_start_z));
             }
             if (g_has_target) {
                 pub_target_model.publish(makeTargetModelMarker(g_last_target_odom));
                 pub_target_arrow.publish(makeTargetArrowMarker(g_last_target_odom));
             } else {
-                pub_target_model.publish(makeDefaultTargetMarker());
-                pub_target_arrow.publish(makeDefaultTargetArrow());
+                pub_target_model.publish(makeDefaultTargetMarker(
+                    state.target_init_x, state.target_init_y, state.target_init_z));
+                pub_target_arrow.publish(makeDefaultTargetArrow(
+                    state.target_init_x, state.target_init_y, state.target_init_z, state.target_init_yaw));
             }
             ROS_INFO_THROTTLE(5.0, "[rviz_publisher] 5Hz tick: has_uav=%d uav_pos=(%.0f,%.0f) has_target=%d tgt_pos=(%.0f,%.0f)",
                               g_has_uav, g_last_uav_odom.pose.pose.position.x, g_last_uav_odom.pose.pose.position.y,
@@ -586,7 +598,6 @@ int main(int argc, char** argv)
     ROS_INFO("[rviz_publisher] 可视化节点就绪");
     ROS_INFO("[rviz_publisher] 在 Rviz 中可通过以下 Display 订阅:");
     ROS_INFO("  - Grid: 白色网格背景（200m 单元格）");
-    ROS_INFO("  - MarkerArray: /obstacles (障碍物)");
     ROS_INFO("  - Marker: /env/bounds (边界线框)");
     ROS_INFO("  - Marker: /sim/status_text (状态文本)");
     ROS_INFO("  - Marker: /uav/model (UAV 3D 箭头)");
@@ -596,6 +607,7 @@ int main(int argc, char** argv)
     ROS_INFO("  - Path: /beam_dubins/path (规划路径)");
     ROS_INFO("  - Odometry: /target/state (目标位姿箭头)");
     ROS_INFO("  - TF: uav_base_link, target_link");
+    ROS_INFO("[rviz_publisher] [已废弃] /obstacles MarkerArray (通道墙壁已禁用)");
 
     ROS_INFO("[rviz_publisher] 进入 spin 循环...");
     ros::spin();

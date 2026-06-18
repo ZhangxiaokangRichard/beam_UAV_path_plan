@@ -8,9 +8,11 @@
     <!-- 启动：roslaunch uav_guide_env rviz.launch                  -->
     <!-- ═══════════════════════════════════════════════════════════ -->
 
-    <!-- 1. 加载环境参数（障碍物、空间边界等） -->
+    <!-- 1. 加载环境参数 -->
     <rosparam file="$(find uav_guide_env)/config/scenario.yaml"
               command="load" ns="scenario"/>
+    <rosparam file="$(find uav_guide_env)/config/target_trajectory.yaml"
+              command="load" ns="target"/>
     <rosparam ns="space" param="lx">10000.0</rosparam>
     <rosparam ns="space" param="ly">5000.0</rosparam>
     <rosparam ns="space" param="lz">1000.0</rosparam>

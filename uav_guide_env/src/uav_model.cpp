@@ -66,7 +66,7 @@ std::array<double, 5> FixedWingUAV::step(
 void FixedWingUAV::advanceAlongPath(
     std::array<double, 5>& pose,
     const std::vector<std::array<double, 4>>& path,
-    int& path_ptr, size_t& last_path_id,
+    int& path_ptr, size_t& last_path_gen,
     const std::array<double, 5>& goal,
     double distance) const
 {
@@ -76,26 +76,7 @@ void FixedWingUAV::advanceAlongPath(
         return;
     }
 
-    // ── 检测路径是否更新（best_path 变了）─────────────────
-    // 路径更新时从 UAV 最近点重新定位指针
-    size_t path_id = reinterpret_cast<size_t>(path.data());
-    if (path_id != last_path_id) {
-        last_path_id = path_id;
-        // 向前搜索最近路径点作为新指针起点
-        double best_dist = INFINITY;
-        int best_idx = path_ptr;
-        for (int i = path_ptr; i < static_cast<int>(path.size()); ++i) {
-            double dx = path[i][0] - pose[0];
-            double dy = path[i][1] - pose[1];
-            double d = std::sqrt(dx * dx + dy * dy);
-            if (d < best_dist) {
-                best_dist = d;
-                best_idx = i;
-            }
-        }
-        path_ptr = std::max(0, best_idx);
-    }
-
+    // ── 路径更新检测由调用方处理（simulation_loop 通过 path_generation 判断）──
     double dist_left = distance;
 
     while (dist_left > 1e-3 && path_ptr < static_cast<int>(path.size()) - 1) {

@@ -4,7 +4,7 @@
 # ═══════════════════════════════════════════════════════════════
 
 cruise_speed_mps: 50.0          # 巡航速度 (m/s)
-min_turn_radius_m: 250.0        # 最小水平转弯半径 (m)
+min_turn_radius_m: 500.0        # 最小水平转弯半径 (m)
 max_pitch_angle_deg: 5.0        # 最大俯仰角 (°)
 collision_radius_m: 5.0         # 碰撞球半径 (m)
 

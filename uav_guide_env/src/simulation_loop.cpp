@@ -61,7 +61,7 @@ struct SimulationState {
     std::vector<double>    trail_y;    // 航迹 Y
     std::vector<double>    trail_z;    // 航迹 Z
     int    path_ptr     = 0;          // 路径推进指针（只进不退）
-    size_t last_path_id = 0;          // 检测路径更新
+    size_t path_generation = 0;       // 路径代际计数器（递增 = 新路径）
 
     // ── 目标 ──
     std::array<double, 5> goal_state; // [x, y, z, yaw, pitch]
@@ -77,6 +77,9 @@ struct SimulationState {
     // ── 空间边界 ──
     double lx = 10000.0, ly = 5000.0, lz = 1000.0;
     double boundary_margin = 50.0;
+
+    // ── 终端逼近 ──
+    double approach_distance = 1000.0;  // 规划到目标后方 L 米（alg_replan.md 方案 A）
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -231,7 +234,7 @@ int main(int argc, char** argv)
         double cx=8000,cy=2500,cz=600,r=500,omega=5;
         ros::param::param<double>("/target/trajectories/circle/center_x", cx, cx);  // 这些路径名需要与 YAML 对齐
         // 简化：直接用默认值，实际由 YAML 结构决定
-        traj_params = {8000.0, 2500.0, 600.0, 500.0, 5.0};
+        traj_params = {2000.0, 2500.0, 600.0, 500.0, 3.0};
     }
     if (traj_type == "line") {
         double dir=90, spd=20, len=4000;
@@ -245,11 +248,11 @@ int main(int argc, char** argv)
     double sim_dt    = 0.1;
     int plan_int     = 2;
     int reset_int    = 30;
-    int max_steps    = 5000;
+    int max_steps    = 8000;
     ros::param::param<double>("/simulation/dt",                  sim_dt,    0.1);
     ros::param::param<int>   ("/simulation/plan_interval",       plan_int,  2);
     ros::param::param<int>   ("/simulation/beam_reset_interval", reset_int, 30);
-    ros::param::param<int>   ("/simulation/max_sim_steps",       max_steps, 5000);
+    ros::param::param<int>   ("/simulation/max_sim_steps",       max_steps, 8000);
 
     // 场景起点
     std::vector<double> start_vec;
@@ -271,43 +274,25 @@ int main(int argc, char** argv)
     uav_guide_env::TargetTrajectory target(traj_type, init_pos, traj_params);
     uav_guide_env::ObstacleManager obs_mgr(lx, ly, lz, bm);
 
-    // 从 /target/channel/* 读取通道障碍物参数
-    uav_guide_env::ChannelParams ch_params;
-    ros::param::param<double>("/target/channel/inner_width",    ch_params.inner_width,    100.0);
-    ros::param::param<double>("/target/channel/wall_length",    ch_params.wall_length,    2000.0);
-    ros::param::param<double>("/target/channel/wall_thickness", ch_params.wall_thickness, 2000.0);
-    ros::param::param<double>("/target/channel/wall_height",    ch_params.wall_height,    1000.0);
-    ros::param::param<double>("/target/channel/safe_margin",    ch_params.safe_margin,    5.0);
-    ros::param::param<double>("/target/channel/wall_z_base",    ch_params.wall_z_base,    0.0);
-    target.setChannelParams(ch_params);
-
-    // 创建通道墙壁障碍物（左墙+右墙）
-    {
-        auto state0 = target.positionAt(0.0);
-        auto walls = target.computeChannelWalls(state0);
-        // 左墙
-        auto left_wall = std::make_unique<uav_guide_env::DynamicObstacle>(
-            walls.left_min[0], walls.left_min[1], walls.left_min[2],
-            walls.left_max[0] - walls.left_min[0],
-            walls.left_max[1] - walls.left_min[1],
-            walls.left_max[2] - walls.left_min[2],
-            0.0, 0.0, 0.0, ch_params.safe_margin);
-        obs_mgr.addObstacle(std::move(left_wall));
-        // 右墙
-        auto right_wall = std::make_unique<uav_guide_env::DynamicObstacle>(
-            walls.right_min[0], walls.right_min[1], walls.right_min[2],
-            walls.right_max[0] - walls.right_min[0],
-            walls.right_max[1] - walls.right_min[1],
-            walls.right_max[2] - walls.right_min[2],
-            0.0, 0.0, 0.0, ch_params.safe_margin);
-        obs_mgr.addObstacle(std::move(right_wall));
-    }
-    ROS_INFO("[simulation_loop] 通道墙壁已创建 (inner_width=%.0fm, wall=%0.f×%.0f×%.0fm)",
-             ch_params.inner_width, ch_params.wall_thickness,
-             ch_params.wall_length, ch_params.wall_height);
+    // [已废弃] 通道墙壁障碍物 — 由 approach_distance + 虚拟目标替代
+    // uav_guide_env::ChannelParams ch_params;
+    // ros::param::param<double>("/target/channel/inner_width",    ch_params.inner_width,    100.0);
+    // ...
+    // { auto state0 = target.positionAt(0.0);
+    //   auto walls = target.computeChannelWalls(state0);
+    //   auto left_wall = std::make_unique<uav_guide_env::DynamicObstacle>(...);
+    //   obs_mgr.addObstacle(std::move(left_wall));
+    //   auto right_wall = std::make_unique<uav_guide_env::DynamicObstacle>(...);
+    //   obs_mgr.addObstacle(std::move(right_wall));
+    // }
 
     // ── 仿真状态 ──────────────────────────────────────────────
     SimulationState sim;
+
+    // 加载终端逼近距离 L（alg_replan.md 方案 A）
+    ros::param::param<double>("/target/approach_distance", sim.approach_distance, 1000.0);
+    ROS_INFO("[simulation_loop] 终端逼近距离: L=%.0fm（通道墙壁已禁用）", sim.approach_distance);
+
     sim.plan_interval  = plan_int;
     sim.reset_interval = reset_int;
     sim.max_steps      = max_steps;
@@ -349,7 +334,7 @@ int main(int argc, char** argv)
     ros::Rate rate(1.0 / sim_dt);  // 10Hz
     bool first_plan_done = false;
 
-    while (ros::ok() && sim.sim_step < max_steps && !sim.reached) {
+    while (ros::ok() && sim.sim_step < max_steps) {
         ros::Time now = ros::Time::now();
 
         // ═══════════════════════════════════════════════════════
@@ -372,31 +357,11 @@ int main(int argc, char** argv)
             makeOdometry(sim.goal_state, 0.0, "map", "target_link", now));
         broadcastTF(tf_br, "map", "target_link", sim.goal_state, now);
 
-        // ═══════════════════════════════════════════════════════
-        // 2. 更新通道墙壁（跟随目标位置和朝向）
-        // ═══════════════════════════════════════════════════════
-        {
-            auto walls = target.computeChannelWalls(sim.goal_state);
-            auto& obs_list = obs_mgr.getObstacles();
-            if (obs_list.size() >= 2) {
-                // 左墙（索引 0）
-                auto* left = dynamic_cast<uav_guide_env::DynamicObstacle*>(obs_list[0].get());
-                if (left) {
-                    left->followGoalY(walls.left_min[1], 0.0);  // 直接设 Y
-                    // 更新全部 AABB min/max
-                    left->update(0.0);  // 触发 AABB 重算（不够精确，手动覆盖）
-                }
-                // 右墙（索引 1）
-                auto* right = dynamic_cast<uav_guide_env::DynamicObstacle*>(obs_list[1].get());
-                if (right) {
-                    right->followGoalY(walls.right_min[1], 0.0);
-                    right->update(0.0);
-                }
-                // 直接把 AABB 覆盖为计算值（绕过 followGoalY 的 Y 轴局限）
-                obs_mgr.overrideObstacleAABB(0, walls.left_min, walls.left_max);
-                obs_mgr.overrideObstacleAABB(1, walls.right_min, walls.right_max);
-            }
-        }
+        // [已废弃] 通道墙壁更新 — 由 approach_distance + 虚拟目标替代
+        // {
+        //     auto walls = target.computeChannelWalls(sim.goal_state);
+        //     ...
+        // }
 
         // ═══════════════════════════════════════════════════════
         // 3. 定期重置 beam（从 UAV 当前位置）
@@ -406,7 +371,6 @@ int main(int argc, char** argv)
                      sim.sim_step, sim.uav_pose[0], sim.uav_pose[1]);
             // 清空路径，让下次规划从 UAV 当前位置开始
             sim.path_ptr = 0;
-            sim.last_path_id = 0;
             sim.best_path.clear();
         }
 
@@ -420,11 +384,30 @@ int main(int argc, char** argv)
             srv.request.header.frame_id = "map";
 
             // 起点 = UAV 当前位置
-            srv.request.start = {sim.uav_pose[0], sim.uav_pose[1], sim.uav_pose[2],
-                                 sim.uav_pose[3], sim.uav_pose[4]};
-            // 终点 = 目标位置
-            srv.request.goal  = {sim.goal_state[0], sim.goal_state[1], sim.goal_state[2],
-                                 sim.goal_state[3], sim.goal_state[4]};
+            srv.request.start[0] = sim.uav_pose[0];
+            srv.request.start[1] = sim.uav_pose[1];
+            srv.request.start[2] = sim.uav_pose[2];
+            srv.request.start[3] = sim.uav_pose[3];
+            srv.request.start[4] = sim.uav_pose[4];
+
+            // ── 虚拟目标（alg_replan.md 方案 A）────────────────
+            // virtual_goal = 目标 - L * (cos(yaw), sin(yaw))
+            // 即目标后方 L 米处，保证规划不会越过目标
+            double L = sim.approach_distance;
+            double gx = sim.goal_state[0];
+            double gy = sim.goal_state[1];
+            double gz = sim.goal_state[2];
+            double gyaw = sim.goal_state[3];
+            double virtual_x = gx - L * std::cos(gyaw);
+            double virtual_y = gy - L * std::sin(gyaw);
+            double virtual_z = gz;
+
+            // 终点 = 虚拟目标（而非实际目标），引导 UAV 从后方逼近
+            srv.request.goal[0] = virtual_x;
+            srv.request.goal[1] = virtual_y;
+            srv.request.goal[2] = virtual_z;
+            srv.request.goal[3] = gyaw;
+            srv.request.goal[4] = sim.goal_state[4];
 
             // 空间边界
             srv.request.space_lx        = sim.lx;
@@ -432,15 +415,8 @@ int main(int argc, char** argv)
             srv.request.space_lz        = sim.lz;
             srv.request.boundary_margin = sim.boundary_margin;
 
-            // 障碍物快照
-            auto aabbs = obs_mgr.snapshotAABBs();
-            srv.request.obstacles.reserve(aabbs.size());
-            for (const auto& a : aabbs) {
-                beam_dubins::Obstacle obs_msg;
-                obs_msg.aabb_min = {a[0], a[1], a[2]};
-                obs_msg.aabb_max = {a[3], a[4], a[5]};
-                srv.request.obstacles.push_back(obs_msg);
-            }
+            // [已废弃] 障碍物为空（通道墙壁已禁用）
+            srv.request.obstacles.clear();
 
             srv.request.time_limit_ms = 0.0;  // 不限制
             srv.request.use_3d        = false;
@@ -459,6 +435,7 @@ int main(int argc, char** argv)
                     for (const auto& pp : srv.response.path) {
                         sim.best_path.push_back({pp.x, pp.y, pp.z, pp.yaw});
                     }
+                    sim.path_generation++;  // 路径代际递增，触发 UAV 重新定位路径指针
                     // 发布搜索树 Marker（基于路径近似）
                     auto tree_marker = makeSearchTreeMarker(sim.best_path, "map", now);
                     pub_bd_tree.publish(tree_marker);
@@ -494,8 +471,25 @@ int main(int argc, char** argv)
         // 6. UAV 沿路径推进 V×dt（每周期都执行）
         // ═══════════════════════════════════════════════════════
         double advance_dist = cruise_speed * sim_dt;
+
+        // 路径代际变化 → 从 UAV 最近点重新定位指针
+        static size_t s_last_gen = 0;
+        if (sim.path_generation != s_last_gen) {
+            s_last_gen = sim.path_generation;
+            // 搜索最近路径点作为新起点
+            double best_d = INFINITY;
+            int best_i = sim.path_ptr;
+            for (int i = sim.path_ptr; i < static_cast<int>(sim.best_path.size()); ++i) {
+                double dx = sim.best_path[i][0] - sim.uav_pose[0];
+                double dy = sim.best_path[i][1] - sim.uav_pose[1];
+                double d = std::sqrt(dx*dx + dy*dy);
+                if (d < best_d) { best_d = d; best_i = i; }
+            }
+            sim.path_ptr = std::max(0, best_i);
+        }
+
         uav.advanceAlongPath(sim.uav_pose, sim.best_path,
-                             sim.path_ptr, sim.last_path_id,
+                             sim.path_ptr, sim.path_generation,
                              sim.goal_state, advance_dist);
 
         // ═══════════════════════════════════════════════════════
@@ -528,14 +522,19 @@ int main(int argc, char** argv)
         }
 
         // ═══════════════════════════════════════════════════════
-        // 8. 检查终止条件
+        // 8. 到达检测（不终止仿真，持续跟踪目标）
         // ═══════════════════════════════════════════════════════
         double tol_xy = 50.0;
         ros::param::param<double>("/beam_dubins/goal_tolerance_xy", tol_xy, 50.0);
-        if (dist2d(sim.uav_pose, sim.goal_state) < tol_xy) {
-            sim.reached = true;
-            ROS_INFO("[simulation_loop] ★★★ 目标到达！ step=%d time=%.1fs ★★★",
+        if (!sim.reached && dist2d(sim.uav_pose, sim.goal_state) < tol_xy) {
+            sim.reached = true;  // 仅标记"曾经到达"，不影响循环
+            ROS_INFO("[simulation_loop] ★★★ 到达目标邻域！ step=%d time=%.1fs（继续跟踪）★★★",
                      sim.sim_step, sim.sim_time);
+        }
+        // 若已到达过但再次远离，重置标记以便再次记录到达
+        if (sim.reached && dist2d(sim.uav_pose, sim.goal_state) > tol_xy * 3.0) {
+            sim.reached = false;
+            ROS_INFO("[simulation_loop] step=%d: UAV 已远离目标，重新跟踪", sim.sim_step);
         }
 
         // ═══════════════════════════════════════════════════════
@@ -547,7 +546,7 @@ int main(int argc, char** argv)
             oss << "Step " << sim.sim_step << "/" << max_steps
                 << " | t=" << std::fixed << std::setprecision(1) << sim.sim_time << "s"
                 << " | cost=" << (sim.best_cost < INFINITY ? std::to_string(static_cast<int>(sim.best_cost)) + "m" : "N/A")
-                << " | " << (sim.reached ? "REACHED" : "tracking");
+                << " | " << (sim.reached ? "REACHED (tracking)" : "tracking");
             status_msg.data = oss.str();
             pub_sim_status.publish(status_msg);
         }
@@ -561,9 +560,9 @@ int main(int argc, char** argv)
     }
 
     if (sim.reached) {
-        ROS_INFO("[simulation_loop] 仿真完成：成功到达目标");
-    } else if (sim.sim_step >= max_steps) {
-        ROS_WARN("[simulation_loop] 仿真终止：达到最大步数 %d", max_steps);
+        ROS_INFO("[simulation_loop] 仿真完成：已达最大步数 %d（期间成功抵近目标）", max_steps);
+    } else {
+        ROS_WARN("[simulation_loop] 仿真终止：达到最大步数 %d（未抵近目标）", max_steps);
     }
 
     return 0;

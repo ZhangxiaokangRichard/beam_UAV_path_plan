@@ -68,6 +68,7 @@ struct BeamNode {
     double g          = 0.0;            // 累计路径长度 (m)
     double t          = 0.0;            // 累计飞行时间 (s)
     int depth         = 0;              // 搜索深度（根=0）
+    int all_nodes_idx = -1;             // 本节点在 all_nodes_ 中的索引（用于 build_path 回溯）
     double clearance  = INFINITY;       // 局部障碍物距离探测值 (m)
 };
 
