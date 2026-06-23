@@ -12,4 +12,11 @@ collision_radius_m: 5.0         # 碰撞球半径 (m)
 sim_dt: 0.1                     # 状态更新周期 (s)，10Hz
 plan_dt: 0.2                    # 规划调用周期 (s)，5Hz
 beam_reset_interval: 30         # beam 重置周期（步数）
-max_sim_steps: 5000             # 最大仿真步数
+max_sim_steps: 8000             # 最大仿真步数
+
+# ── 航向连续性保护（Phase 3 Full, uav_dynamic.md）──────────
+heading_continuity_enabled: true    # 是否启用航向连续性保护
+heading_jump_threshold_deg: 5.0     # 航向跳变阈值 (°)，超过此值触发拦截（0=使用 ω_max×dt 自动阈值）
+
+# ── 路径跟踪 lookahead（uav_dynamicR2.md）─────────────────
+path_lookahead_n: 5                 # 前视路径点数量（纯追踪，提前预判前方直段方向）

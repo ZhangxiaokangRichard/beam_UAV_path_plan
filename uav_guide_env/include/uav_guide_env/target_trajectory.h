@@ -115,8 +115,8 @@ private:
 
     // ── circle 参数 ──
     double circle_cx_ = 8000.0, circle_cy_ = 2500.0, circle_cz_ = 600.0;
-    double circle_radius_ = 500.0;     // m
-    double circle_omega_  = 0.087266;  // rad/s (=5°/s)
+    double circle_radius_ = 100.0;     // m
+    double circle_omega_  = 0.0087266;  // rad/s (=0.5°/s)
 
     // ── racetrack 参数 ──
     double rt_straight_len_ = 1000.0;  // m

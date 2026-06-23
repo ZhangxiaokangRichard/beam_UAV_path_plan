@@ -1,24 +1,31 @@
 /**
  * @file simulation_loop.cpp
- * @brief 主仿真循环节点（Phase 2c：环境更新 → 规划请求 → UAV 推进 → Topic/TF 发布）
+ * @brief 主仿真循环节点（Phase 3 Full：Tracking 模式 + 双虚拟目标竞标）
  *
- * 从 Python beam_dubins_2d_dynamic.py → BeamDubinsDynamicSim 迁移。
+ * 从 Python beam_dubins_2d_dynamic.py → BeamDubinsDynamicSim 迁移，
+ * 依据 alg_phase3_full.md 扩展。
+ *
+ * 状态机：NORMAL ⇄ TRACKING
+ *   NORMAL：  5Hz 双规划竞标（尾追 rear / 迎头 front），选代价较低路径
+ *   TRACKING：路径耗尽后直线追踪实际目标，监视 d(dist)/dt 趋势
  *
  * 时序（10Hz Timer，dt=0.1s）：
- *   奇数周期（0.0s, 0.2s, 0.4s, ...）5Hz 规划：
+ *   每周期：
  *     1. 更新目标位置（TargetTrajectory::positionAt）
- *     2. 更新动态障碍物（跟随目标 Y）
- *     3. 构建 PlanPath 请求 → 调用 /beam_dubins/plan_path 服务
- *     4. 存储/发布最优路径
- *     5. UAV 沿路径推进 V×dt
- *   偶数周期（0.1s, 0.3s, 0.5s, ...）仅推进：
- *     1. 更新目标位置
- *     2. UAV 沿路径推进 V×dt
+ *     2. 发布 /target/state, TF
+ *   奇数周期（5Hz）：
+ *     3. NORMAL 模式：交替规划 rear/front → 竞标 → best_path
+ *        TRACKING 模式：跳过规划
+ *   每周期：
+ *     4. NORMAL：UAV 沿 best_path 推进 V×dt
+ *        TRACKING：直线死推算朝实际目标
+ *     5. 检查 Tracking 进入/退出条件
+ *     6. 发布状态 /sim/status
  *
  * 设计要点：
- *  - 同步 Service 调用：规划阻塞 0.1~0.3s，在偶数周期补偿
- *  - 定期重置 beam（BEAM_RESET_INTERVAL）
- *  - 路径耗尽时死推算朝目标方向前进
+ *  - 交替竞标：奇数周期=尾追，偶数周期=迎头，每两个周期完成一次完整竞标
+ *  - 追踪监视：每 tracking_window 距离评估距离趋势，连续远离 N 次退出
+ *  - 向后兼容：dual_plan_enabled=false → 纯尾追；tracking_entry_dist=0 → 禁用 Tracking
  */
 
 #include <ros/ros.h>
@@ -80,6 +87,26 @@ struct SimulationState {
 
     // ── 终端逼近 ──
     double approach_distance = 1000.0;  // 规划到目标后方 L 米（alg_replan.md 方案 A）
+
+    // ── Tracking 模式（alg_phase3_full.md 问题一）────────
+    bool   tracking_mode           = false;   // 是否处于直线追踪模式
+    double tracking_entry_dist     = 2000.0;   // 进入 tracking 的最大 UAV-目标距离 (m)
+    double tracking_window         = 100.0;    // 趋势评估窗口距离 (m)
+    double tracking_distance_accum = 0.0;      // 当前窗口累积距离 (m)
+    double last_tracking_dist      = INFINITY; // 上一次评估时的 UAV-目标距离
+    int    consecutive_diverging   = 0;        // 连续远离计数器
+    int    divergence_threshold    = 3;        // 连续远离多少次后退出 tracking
+    double virtual_goal_tolerance  = 200.0;    // 到达 virtual_goal 的容忍距离 (m)
+
+    // ── 双模式竞标（alg_phase3_full.md 问题二）────────
+    bool   dual_plan_enabled  = true;     // 是否启用尾追+迎头双规划竞标
+    bool   plan_phase         = false;    // false=尾追周期, true=迎头周期（交替）
+    bool   first_plan_pending = true;     // 首次规划需跑满两相才能竞标
+    double cached_cost_rear   = INFINITY; // 缓存的尾追代价
+    double cached_cost_front  = INFINITY; // 缓存的迎头代价
+    std::vector<std::array<double, 4>> cached_path_rear;   // 缓存的尾追路径
+    std::vector<std::array<double, 4>> cached_path_front;  // 缓存的迎头路径
+    std::string active_mode   = "tail";   // 当前活跃模式："tail" / "head-on"
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -91,6 +118,91 @@ static double dist2d(const std::array<double, 5>& a, const std::array<double, 5>
     double dx = a[0] - b[0];
     double dy = a[1] - b[1];
     return std::sqrt(dx * dx + dy * dy);
+}
+
+/// 2D 距离（对 array<double,5> 和 array<double,5> 的简化版，用于虚拟目标距离计算）
+static double dist2d_vg(const std::array<double, 5>& a, const std::array<double, 5>& b) {
+    double dx = a[0] - b[0];
+    double dy = a[1] - b[1];
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+// ── 双虚拟目标结构体 ──────────────────────────────────────
+struct VirtualGoals {
+    std::array<double, 5> rear;   // 尾追虚拟目标 [x,y,z,yaw,pitch]
+    std::array<double, 5> front;  // 迎头虚拟目标 [x,y,z,yaw,pitch]
+};
+
+/// 计算双虚拟目标（尾追 + 迎头截击）
+static VirtualGoals computeVirtualGoals(
+    const std::array<double, 5>& target,
+    double approach_distance)
+{
+    VirtualGoals vg;
+    double tx = target[0], ty = target[1], tz = target[2];
+    double psi = target[3], theta = target[4];
+    double L = approach_distance;
+    double c = std::cos(psi), s = std::sin(psi);
+
+    // 尾追（后方）：目标后方 L 米，同向
+    vg.rear = {tx - L * c, ty - L * s, tz, psi, theta};
+
+    // 迎头（前方）：目标前方 L 米，反向
+    double front_yaw = psi + M_PI;
+    while (front_yaw >  M_PI) front_yaw -= 2.0 * M_PI;
+    while (front_yaw < -M_PI) front_yaw += 2.0 * M_PI;
+    vg.front = {tx + L * c, ty + L * s, tz, front_yaw, theta};
+
+    return vg;
+}
+
+/// 调用规划服务（提取公共逻辑）
+static bool callPlanner(
+    ros::ServiceClient& client,
+    const std::array<double, 5>& start,
+    const std::array<double, 5>& goal,
+    const SimulationState& sim,
+    const ros::Time& now,
+    double& out_cost,
+    std::vector<std::array<double, 4>>& out_path,
+    int& out_nodes, int& out_depth, double& out_time, std::string& out_status)
+{
+    beam_dubins::PlanPath srv;
+    srv.request.header.stamp    = now;
+    srv.request.header.frame_id = "map";
+    srv.request.start[0] = start[0];
+    srv.request.start[1] = start[1];
+    srv.request.start[2] = start[2];
+    srv.request.start[3] = start[3];
+    srv.request.start[4] = start[4];
+    srv.request.goal[0] = goal[0];
+    srv.request.goal[1] = goal[1];
+    srv.request.goal[2] = goal[2];
+    srv.request.goal[3] = goal[3];
+    srv.request.goal[4] = goal[4];
+    srv.request.space_lx        = sim.lx;
+    srv.request.space_ly        = sim.ly;
+    srv.request.space_lz        = sim.lz;
+    srv.request.boundary_margin = sim.boundary_margin;
+    srv.request.obstacles.clear();
+    srv.request.time_limit_ms = 0.0;
+    srv.request.use_3d        = false;
+
+    if (!client.call(srv)) return false;
+
+    out_cost   = srv.response.success ? srv.response.cost : INFINITY;
+    out_nodes  = srv.response.nodes_explored;
+    out_depth  = srv.response.depth_reached;
+    out_time   = srv.response.planning_time_ms;
+    out_status = srv.response.status_message;
+
+    out_path.clear();
+    if (srv.response.success) {
+        for (const auto& pp : srv.response.path) {
+            out_path.push_back({pp.x, pp.y, pp.z, pp.yaw});
+        }
+    }
+    return true;
 }
 
 /// 发布 Odometry 消息
@@ -231,10 +343,10 @@ int main(int argc, char** argv)
     // 轨迹参数
     std::array<double, 5> traj_params = {90.0, 20.0, 4000.0, 0.0, 0.0};  // 默认 line
     if (traj_type == "circle") {
-        double cx=8000,cy=2500,cz=600,r=500,omega=5;
+        double cx=8000,cy=2500,cz=600,r=200,omega=0.5;
         ros::param::param<double>("/target/trajectories/circle/center_x", cx, cx);  // 这些路径名需要与 YAML 对齐
         // 简化：直接用默认值，实际由 YAML 结构决定
-        traj_params = {2000.0, 2500.0, 600.0, 500.0, 3.0};
+        traj_params = {2000.0, 2500.0, 600.0, 200.0, 1.5};
     }
     if (traj_type == "line") {
         double dir=90, spd=20, len=4000;
@@ -269,6 +381,16 @@ int main(int argc, char** argv)
     ros::param::param<double>("/space/lz", lz, 1000.0);
     ros::param::param<double>("/space/boundary_margin", bm, 50.0);
 
+    // 航向连续性保护参数
+    bool heading_continuity_enabled = true;
+    ros::param::param<bool>("/uav/heading_continuity_enabled", heading_continuity_enabled, true);
+    ROS_INFO("[simulation_loop] 航向连续性保护: %s", heading_continuity_enabled ? "启用" : "禁用");
+
+    // 路径跟踪 lookahead 参数（uav_dynamicR2.md）
+    int path_lookahead_n = 5;
+    ros::param::param<int>("/uav/path_lookahead_n", path_lookahead_n, 5);
+    ROS_INFO("[simulation_loop] 路径跟踪 lookahead_n=%d", path_lookahead_n);
+
     // ── 初始化组件 ────────────────────────────────────────────
     uav_guide_env::FixedWingUAV uav(cruise_speed, turn_radius, pitch_deg, collision_r, sim_dt);
     uav_guide_env::TargetTrajectory target(traj_type, init_pos, traj_params);
@@ -292,6 +414,19 @@ int main(int argc, char** argv)
     // 加载终端逼近距离 L（alg_replan.md 方案 A）
     ros::param::param<double>("/target/approach_distance", sim.approach_distance, 1000.0);
     ROS_INFO("[simulation_loop] 终端逼近距离: L=%.0fm（通道墙壁已禁用）", sim.approach_distance);
+
+    // 加载 Tracking 模式参数（alg_phase3_full.md 问题一）
+    ros::param::param<double>("/target/tracking_entry_dist",    sim.tracking_entry_dist,    2000.0);
+    ros::param::param<double>("/target/tracking_window",        sim.tracking_window,        100.0);
+    ros::param::param<int>   ("/target/divergence_threshold",   sim.divergence_threshold,   3);
+    ros::param::param<double>("/target/virtual_goal_tolerance", sim.virtual_goal_tolerance, 200.0);
+    ROS_INFO("[simulation_loop] Tracking: entry=%.0fm window=%.0fm div_thresh=%d vg_tol=%.0fm",
+             sim.tracking_entry_dist, sim.tracking_window,
+             sim.divergence_threshold, sim.virtual_goal_tolerance);
+
+    // 加载双模式竞标参数（alg_phase3_full.md 问题二）
+    ros::param::param<bool>("/target/dual_plan_enabled", sim.dual_plan_enabled, true);
+    ROS_INFO("[simulation_loop] 双模式竞标: %s", sim.dual_plan_enabled ? "启用" : "禁用（仅尾追）");
 
     sim.plan_interval  = plan_int;
     sim.reset_interval = reset_int;
@@ -375,84 +510,116 @@ int main(int argc, char** argv)
         }
 
         // ═══════════════════════════════════════════════════════
-        // 4. 奇数周期：调用规划服务（5Hz）
+        // 4. 规划周期（5Hz）— Tracking 模式下跳过
         // ═══════════════════════════════════════════════════════
         bool is_plan_tick = (sim.sim_step % plan_int == 0);
-        if (is_plan_tick) {
-            beam_dubins::PlanPath srv;
-            srv.request.header.stamp    = now;
-            srv.request.header.frame_id = "map";
+        if (is_plan_tick && !sim.tracking_mode) {
+            // ── 计算双虚拟目标 ────────────────────────────
+            auto vg = computeVirtualGoals(sim.goal_state, sim.approach_distance);
 
-            // 起点 = UAV 当前位置
-            srv.request.start[0] = sim.uav_pose[0];
-            srv.request.start[1] = sim.uav_pose[1];
-            srv.request.start[2] = sim.uav_pose[2];
-            srv.request.start[3] = sim.uav_pose[3];
-            srv.request.start[4] = sim.uav_pose[4];
-
-            // ── 虚拟目标（alg_replan.md 方案 A）────────────────
-            // virtual_goal = 目标 - L * (cos(yaw), sin(yaw))
-            // 即目标后方 L 米处，保证规划不会越过目标
-            double L = sim.approach_distance;
-            double gx = sim.goal_state[0];
-            double gy = sim.goal_state[1];
-            double gz = sim.goal_state[2];
-            double gyaw = sim.goal_state[3];
-            double virtual_x = gx - L * std::cos(gyaw);
-            double virtual_y = gy - L * std::sin(gyaw);
-            double virtual_z = gz;
-
-            // 终点 = 虚拟目标（而非实际目标），引导 UAV 从后方逼近
-            srv.request.goal[0] = virtual_x;
-            srv.request.goal[1] = virtual_y;
-            srv.request.goal[2] = virtual_z;
-            srv.request.goal[3] = gyaw;
-            srv.request.goal[4] = sim.goal_state[4];
-
-            // 空间边界
-            srv.request.space_lx        = sim.lx;
-            srv.request.space_ly        = sim.ly;
-            srv.request.space_lz        = sim.lz;
-            srv.request.boundary_margin = sim.boundary_margin;
-
-            // [已废弃] 障碍物为空（通道墙壁已禁用）
-            srv.request.obstacles.clear();
-
-            srv.request.time_limit_ms = 0.0;  // 不限制
-            srv.request.use_3d        = false;
-
-            // 同步调用
-            if (plan_client.call(srv)) {
-                sim.best_path.clear();
-                sim.nodes_explored = srv.response.nodes_explored;
-                sim.depth_reached  = srv.response.depth_reached;
-                sim.planning_time_ms = srv.response.planning_time_ms;
-                sim.plan_status    = srv.response.status_message;
-
-                if (srv.response.success) {
-                    sim.best_cost = srv.response.cost;
-                    // 将 ROS PathPoint → std::array<double,4>
-                    for (const auto& pp : srv.response.path) {
-                        sim.best_path.push_back({pp.x, pp.y, pp.z, pp.yaw});
+            if (sim.dual_plan_enabled) {
+                // ── 交替竞标：尾追 / 迎头 ──────────────────
+                if (!sim.plan_phase) {
+                    // 尾追相位：规划 uav → rear
+                    ROS_DEBUG("[simulation_loop] step=%d: 尾追规划 phase", sim.sim_step);
+                    bool ok = callPlanner(plan_client, sim.uav_pose, vg.rear, sim, now,
+                                          sim.cached_cost_rear, sim.cached_path_rear,
+                                          sim.nodes_explored, sim.depth_reached,
+                                          sim.planning_time_ms, sim.plan_status);
+                    if (ok) {
+                        ROS_INFO("[simulation_loop] step=%d: 尾追 cost=%.1f path=%zu %s",
+                                 sim.sim_step, sim.cached_cost_rear,
+                                 sim.cached_path_rear.size(), sim.plan_status.c_str());
+                    } else {
+                        ROS_ERROR("[simulation_loop] step=%d: 尾追规划 Service 调用失败", sim.sim_step);
+                        sim.cached_cost_rear = INFINITY;
+                        sim.cached_path_rear.clear();
                     }
-                    sim.path_generation++;  // 路径代际递增，触发 UAV 重新定位路径指针
-                    // 发布搜索树 Marker（基于路径近似）
+                    sim.plan_phase = true;  // 下周期切换迎头
+                    sim.first_plan_pending = false;
+                } else {
+                    // 迎头相位：规划 uav → front
+                    ROS_DEBUG("[simulation_loop] step=%d: 迎头规划 phase", sim.sim_step);
+                    bool ok = callPlanner(plan_client, sim.uav_pose, vg.front, sim, now,
+                                          sim.cached_cost_front, sim.cached_path_front,
+                                          sim.nodes_explored, sim.depth_reached,
+                                          sim.planning_time_ms, sim.plan_status);
+                    if (ok) {
+                        ROS_INFO("[simulation_loop] step=%d: 迎头 cost=%.1f path=%zu %s",
+                                 sim.sim_step, sim.cached_cost_front,
+                                 sim.cached_path_front.size(), sim.plan_status.c_str());
+                    } else {
+                        ROS_ERROR("[simulation_loop] step=%d: 迎头规划 Service 调用失败", sim.sim_step);
+                        sim.cached_cost_front = INFINITY;
+                        sim.cached_path_front.clear();
+                    }
+                    sim.plan_phase = false; // 下周期切换尾追
+
+                    // ── 竞标：选代价较低者 ──────────────────
+                    // 快速启发式：若 UAV 到两个虚拟目标的直线距离差 > 2x，跳过劣势方向
+                    double d_rear  = dist2d(sim.uav_pose, vg.rear);
+                    double d_front = dist2d(sim.uav_pose, vg.front);
+                    bool use_rear  = (sim.cached_cost_rear <= sim.cached_cost_front);
+                    bool rear_ok   = !sim.cached_path_rear.empty();
+                    bool front_ok  = !sim.cached_path_front.empty();
+
+                    if (rear_ok && !front_ok) {
+                        use_rear = true;
+                    } else if (!rear_ok && front_ok) {
+                        use_rear = false;
+                    } else if (rear_ok && front_ok) {
+                        use_rear = (sim.cached_cost_rear <= sim.cached_cost_front);
+                    } else {
+                        // 两者都失败，保持旧路径
+                        ROS_WARN("[simulation_loop] step=%d: 双规划均失败，保持旧路径", sim.sim_step);
+                        use_rear = true;  // 不影响下面逻辑，只是不更新
+                    }
+
+                    if (use_rear && rear_ok) {
+                        sim.best_path = sim.cached_path_rear;
+                        sim.best_cost = sim.cached_cost_rear;
+                        sim.active_mode = "tail";
+                    } else if (!use_rear && front_ok) {
+                        sim.best_path = sim.cached_path_front;
+                        sim.best_cost = sim.cached_cost_front;
+                        sim.active_mode = "head-on";
+                    }
+
+                    if (rear_ok || front_ok) {
+                        sim.path_generation++;
+                        sim.path_ptr = 0;
+                        auto tree_marker = makeSearchTreeMarker(sim.best_path, "map", now);
+                        pub_bd_tree.publish(tree_marker);
+                        ROS_INFO("[simulation_loop] step=%d: 竞标结果 %s cost=%.1f path=%zu (rear=%.1f front=%.1f)",
+                                 sim.sim_step, sim.active_mode.c_str(), sim.best_cost,
+                                 sim.best_path.size(),
+                                 rear_ok ? sim.cached_cost_rear : -1.0,
+                                 front_ok ? sim.cached_cost_front : -1.0);
+                    }
+                }
+            } else {
+                // ── 单尾追模式（向后兼容）──────────────────
+                bool ok = callPlanner(plan_client, sim.uav_pose, vg.rear, sim, now,
+                                      sim.best_cost, sim.best_path,
+                                      sim.nodes_explored, sim.depth_reached,
+                                      sim.planning_time_ms, sim.plan_status);
+                if (ok) {
+                    sim.path_generation++;
+                    sim.path_ptr = 0;
+                    sim.active_mode = "tail";
                     auto tree_marker = makeSearchTreeMarker(sim.best_path, "map", now);
                     pub_bd_tree.publish(tree_marker);
-
                     ROS_INFO("[simulation_loop] step=%d: 规划成功 cost=%.1f path=%zu nodes=%d depth=%d time=%.1fms %s",
                              sim.sim_step, sim.best_cost, sim.best_path.size(),
                              sim.nodes_explored, sim.depth_reached, sim.planning_time_ms,
                              sim.plan_status.c_str());
                 } else {
-                    ROS_WARN("[simulation_loop] step=%d: 规划失败 %s (nodes=%d depth=%d time=%.1fms)",
-                             sim.sim_step, sim.plan_status.c_str(),
-                             sim.nodes_explored, sim.depth_reached, sim.planning_time_ms);
+                    ROS_ERROR("[simulation_loop] step=%d: Service 调用失败", sim.sim_step);
                 }
-            } else {
-                ROS_ERROR("[simulation_loop] step=%d: Service 调用失败", sim.sim_step);
             }
             first_plan_done = true;
+        } else if (is_plan_tick && sim.tracking_mode) {
+            ROS_DEBUG("[simulation_loop] step=%d: TRACKING 模式 — 跳过规划", sim.sim_step);
         }
 
         // ═══════════════════════════════════════════════════════
@@ -468,29 +635,48 @@ int main(int argc, char** argv)
         }
 
         // ═══════════════════════════════════════════════════════
-        // 6. UAV 沿路径推进 V×dt（每周期都执行）
+        // 6. UAV 沿路径推进 V×dt（Tracking 模式下用直线追踪）
         // ═══════════════════════════════════════════════════════
         double advance_dist = cruise_speed * sim_dt;
 
-        // 路径代际变化 → 从 UAV 最近点重新定位指针
-        static size_t s_last_gen = 0;
-        if (sim.path_generation != s_last_gen) {
-            s_last_gen = sim.path_generation;
-            // 搜索最近路径点作为新起点
-            double best_d = INFINITY;
-            int best_i = sim.path_ptr;
-            for (int i = sim.path_ptr; i < static_cast<int>(sim.best_path.size()); ++i) {
-                double dx = sim.best_path[i][0] - sim.uav_pose[0];
-                double dy = sim.best_path[i][1] - sim.uav_pose[1];
-                double d = std::sqrt(dx*dx + dy*dy);
-                if (d < best_d) { best_d = d; best_i = i; }
+        if (sim.tracking_mode) {
+            // Tracking 模式：直线朝实际目标飞行
+            double y_before = sim.uav_pose[1];
+            double yaw_before = sim.uav_pose[3];
+            double goal_y = sim.goal_state[1];
+            uav.deadReckonToward(sim.uav_pose, sim.goal_state, advance_dist);
+            sim.tracking_distance_accum += advance_dist;
+            ROS_INFO_THROTTLE(2.0,
+                "[simulation_loop] TRACKING: y %.0f→%.0f ψ %.1f° goal_y=%.0f dy=%.0f",
+                y_before, sim.uav_pose[1],
+                yaw_before * 180.0 / M_PI,
+                goal_y,
+                goal_y - y_before);
+        } else {
+            // NORMAL 模式：带偏航角约束的连续插值路径跟踪（uav_dynamicR2.md）
+            // 路径代际变化 → 从 UAV 最近点重定位指针（跳过已过时前段）
+            static size_t s_last_gen = 0;
+            if (sim.path_generation != s_last_gen) {
+                s_last_gen = sim.path_generation;
+                // 找到距 UAV 当前位置最近的路径点，跳过缓存路径的前段
+                double best_d = INFINITY;
+                int best_i = 0;
+                for (int i = 0; i < static_cast<int>(sim.best_path.size()); ++i) {
+                    double dx = sim.best_path[i][0] - sim.uav_pose[0];
+                    double dy = sim.best_path[i][1] - sim.uav_pose[1];
+                    double d = std::sqrt(dx*dx + dy*dy);
+                    if (d < best_d) { best_d = d; best_i = i; }
+                }
+                sim.path_ptr = best_i;
+                ROS_DEBUG("[simulation_loop] step=%d: 路径代际变更 gen=%zu mode=%s ptr=%d",
+                          sim.sim_step, sim.path_generation, sim.active_mode.c_str(), best_i);
             }
-            sim.path_ptr = std::max(0, best_i);
-        }
 
-        uav.advanceAlongPath(sim.uav_pose, sim.best_path,
-                             sim.path_ptr, sim.path_generation,
-                             sim.goal_state, advance_dist);
+            uav.interpolateAlongPathWithYawLimit(sim.uav_pose, sim.best_path,
+                                                  sim.path_ptr, sim.path_generation,
+                                                  sim.goal_state, advance_dist,
+                                                  path_lookahead_n);
+        }
 
         // ═══════════════════════════════════════════════════════
         // 7. 发布 UAV 状态和航迹
@@ -521,20 +707,90 @@ int main(int argc, char** argv)
             pub_uav_trail.publish(trail_msg);
         }
 
+        // ── 航向连续性保护（防御性安全网）────────────────────
+        if (heading_continuity_enabled) {
+            static double s_prev_yaw = sim.uav_pose[3];
+            static bool   s_yaw_init = false;
+            if (!s_yaw_init) { s_prev_yaw = sim.uav_pose[3]; s_yaw_init = true; }
+
+            double max_dpsi = (cruise_speed / turn_radius) * sim_dt;
+            double dpsi = sim.uav_pose[3] - s_prev_yaw;
+            while (dpsi >  M_PI) dpsi -= 2.0 * M_PI;
+            while (dpsi < -M_PI) dpsi += 2.0 * M_PI;
+
+            if (std::abs(dpsi) > max_dpsi * 1.5) {
+                double clamped = s_prev_yaw + std::copysign(max_dpsi, dpsi);
+                while (clamped >  M_PI) clamped -= 2.0 * M_PI;
+                while (clamped < -M_PI) clamped += 2.0 * M_PI;
+                ROS_WARN_THROTTLE(1.0,
+                    "[simulation_loop] step=%d: 航向跳变拦截 Δψ=%.1f°→限制为%.1f° (max=%.1f°/tick)",
+                    sim.sim_step,
+                    dpsi * 180.0 / M_PI,
+                    (clamped - s_prev_yaw) * 180.0 / M_PI,
+                    max_dpsi * 180.0 / M_PI);
+                sim.uav_pose[3] = clamped;
+            }
+            s_prev_yaw = sim.uav_pose[3];
+        }
+
         // ═══════════════════════════════════════════════════════
-        // 8. 到达检测（不终止仿真，持续跟踪目标）
+        // 8. 到达检测 (不终止仿真) + Tracking 进入/退出检查
         // ═══════════════════════════════════════════════════════
         double tol_xy = 50.0;
         ros::param::param<double>("/beam_dubins/goal_tolerance_xy", tol_xy, 50.0);
-        if (!sim.reached && dist2d(sim.uav_pose, sim.goal_state) < tol_xy) {
-            sim.reached = true;  // 仅标记"曾经到达"，不影响循环
+        double d_to_target = dist2d(sim.uav_pose, sim.goal_state);
+
+        if (!sim.reached && d_to_target < tol_xy) {
+            sim.reached = true;
             ROS_INFO("[simulation_loop] ★★★ 到达目标邻域！ step=%d time=%.1fs（继续跟踪）★★★",
                      sim.sim_step, sim.sim_time);
         }
-        // 若已到达过但再次远离，重置标记以便再次记录到达
-        if (sim.reached && dist2d(sim.uav_pose, sim.goal_state) > tol_xy * 3.0) {
+        if (sim.reached && d_to_target > tol_xy * 3.0) {
             sim.reached = false;
             ROS_INFO("[simulation_loop] step=%d: UAV 已远离目标，重新跟踪", sim.sim_step);
+        }
+
+        // ── Tracking 进入条件检查 ─────────────────────────
+        if (!sim.tracking_mode && sim.path_ptr >= static_cast<int>(sim.best_path.size()) - 1
+            && !sim.best_path.empty()) {
+            if (d_to_target < sim.tracking_entry_dist) {
+                // 计算当前活跃模式的 virtual_goal 距离
+                auto vg = computeVirtualGoals(sim.goal_state, sim.approach_distance);
+                const auto& vgoal = (sim.active_mode == "head-on") ? vg.front : vg.rear;
+                double d_to_virtual = dist2d(sim.uav_pose, vgoal);
+                if (d_to_virtual < sim.virtual_goal_tolerance) {
+                    sim.tracking_mode = true;
+                    sim.tracking_distance_accum = 0.0;
+                    sim.consecutive_diverging = 0;
+                    sim.last_tracking_dist = d_to_target;
+                    ROS_INFO("[simulation_loop] step=%d: >>> 进入 TRACKING 模式 (dist=%.0fm mode=%s)",
+                             sim.sim_step, d_to_target, sim.active_mode.c_str());
+                }
+            }
+        }
+
+        // ── Tracking 趋势评估（每 tracking_window 评估一次）──
+        if (sim.tracking_mode && sim.tracking_distance_accum >= sim.tracking_window) {
+            double delta = d_to_target - sim.last_tracking_dist;
+            if (delta > 0) {
+                sim.consecutive_diverging++;
+                ROS_WARN("[simulation_loop] step=%d: tracking 距离增大 +%.1fm (%d/%d)",
+                         sim.sim_step, delta, sim.consecutive_diverging, sim.divergence_threshold);
+            } else {
+                sim.consecutive_diverging = 0;
+            }
+            sim.last_tracking_dist = d_to_target;
+            sim.tracking_distance_accum = 0.0;
+
+            if (sim.consecutive_diverging >= sim.divergence_threshold) {
+                sim.tracking_mode = false;
+                sim.best_path.clear();
+                sim.path_ptr = 0;
+                sim.path_generation++;
+                sim.consecutive_diverging = 0;
+                sim.first_plan_pending = true;  // 重新竞标
+                ROS_WARN("[simulation_loop] step=%d: <<< 退出 TRACKING 模式，恢复规划", sim.sim_step);
+            }
         }
 
         // ═══════════════════════════════════════════════════════
@@ -546,7 +802,8 @@ int main(int argc, char** argv)
             oss << "Step " << sim.sim_step << "/" << max_steps
                 << " | t=" << std::fixed << std::setprecision(1) << sim.sim_time << "s"
                 << " | cost=" << (sim.best_cost < INFINITY ? std::to_string(static_cast<int>(sim.best_cost)) + "m" : "N/A")
-                << " | " << (sim.reached ? "REACHED (tracking)" : "tracking");
+                << " | " << (sim.tracking_mode ? "TRACKING" : (sim.reached ? "REACHED" : "planning"))
+                << " | mode=" << sim.active_mode;
             status_msg.data = oss.str();
             pub_sim_status.publish(status_msg);
         }
