@@ -3,7 +3,7 @@
 # 从 Python config/target_trajectory.json 迁移
 # ═══════════════════════════════════════════════════════════════
 
-initial_position: [3000.0, 1500.0, 600.0]  # [x, y, z]
+initial_position: [4500.0, 3000.0, 600.0]  # [x, y, z]
 # initial_heading_deg: 90                      # 初始航向 (°)
 trajectory_type: "line"                     # static / line / racetrack / circle
 
@@ -12,9 +12,9 @@ trajectories:
     speed_mps: 0
 
   line:
-    direction_deg: 225.0           # 运动方向 (°)：0=北+Y，90=东+X，180=南-Y，270=西-X
+    direction_deg: 270.0           # 运动方向 (°)：0=北+Y，90=东+X，180=南-Y，270=西-X
     speed_mps: 20.0                         # 速度 (m/s)
-    length_m: 4000.0                        # 最大行程 (m)
+    length_m: 6000.0                        # 最大行程 (m)
 
   racetrack:
     straight_length_m: 1000.0               # 直线段长度 (m)
@@ -24,14 +24,27 @@ trajectories:
     lap_speed_mps: 30.0                     # 绕圈速度 (m/s)
 
   circle:
-    center: [2000.0, 1500.0, 600.0]        # 圆心 [x, y, z]
-    radius_m: 1000.0                         # 半径 (m)
-    angular_speed_dps: 5.0                  # 角速度 (°/s)
+    center: [3000.0, 4000.0, 600.0]        # 圆心 [x, y, z]
+    radius_m: 200.0                         # 半径 (m)
+    angular_speed_dps: 2.5                  # 角速度 (°/s)
 
 # ═══════════════════════════════════════════════════════════════
-# 终端逼近约束（替代通道墙壁方案，见 alg_replan.md 方案 A）
+# Phase 3 v0.1：拦截模式 + 偏移距离（alg_phase3_v01.md）
 # ═══════════════════════════════════════════════════════════════
-approach_distance: 1000.0       # 终端直飞逼近距离 L (m)：规划到目标后方 L 处
+
+# ── 拦截模式 ──────────────────────────────────────────────
+intercept_mode: "head-on"              # "tail"=尾追 / "head-on"=迎头截击
+approach_distance_tail: 1000.0      # 尾追模式偏移距离 L (m)
+approach_distance_headon: 1000.0    # 迎头模式偏移距离 L (m)，通常更长
+
+# ── Tracking 模式参数 ──────────────────────────────────
+tracking_entry_dist: 2000.0         # 进入 tracking 的最大 UAV-目标距离 (m)
+tracking_window: 100.0              # 趋势评估窗口距离 (m)
+divergence_threshold: 3             # 连续远离次数阈值
+virtual_goal_tolerance: 200.0       # 到达 virtual_goal 的容忍距离 (m)
+
+# ── 扇形捕获区（§3.8，解决近场重规划振荡）───────────────
+sector_half_angle_deg: 20.0         # 扇形半角 (°)，UAV 进入扇形后直飞实际目标
 
 # ═══════════════════════════════════════════════════════════════
 # [已废弃] 通道障碍物参数 — 由 approach_distance 替代

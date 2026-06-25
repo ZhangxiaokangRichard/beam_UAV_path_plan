@@ -20,7 +20,7 @@ namespace uav_guide_env {
 
 /**
  * @struct ChannelParams
- * @brief 通道障碍物配置（AABB 墙壁，形成引导通道）
+ * @brief [已废弃] 通道障碍物配置 — 由 approach_distance + 虚拟目标替代
  */
 struct ChannelParams {
     double inner_width    = 100.0;   // 通道内部宽度（两墙内边间距，m）
@@ -72,25 +72,33 @@ public:
     std::array<double, 5> positionAt(double t) const;
 
     /**
-     * @brief 设置通道障碍物参数
+     * @brief [已废弃] 设置通道障碍物参数
      */
     void setChannelParams(const ChannelParams& params) { channel_ = params; }
 
     /**
-     * @brief 获取通道障碍物参数
+     * @brief [已废弃] 获取通道障碍物参数
      */
     const ChannelParams& getChannelParams() const { return channel_; }
 
     /**
-     * @brief 计算通道两侧墙壁的 AABB
-     * @param target_state  目标当前 5D 位姿 [x, y, z, yaw, pitch]
-     * @return 左右墙的 min/max 角点
-     *
-     * 墙壁沿目标航向延伸（dy=wall_length），
-     * 通道缺口垂直航向（dx=wall_thickness），
-     * 左墙在航向左侧（yaw-π/2 方向），右墙在航向右侧（yaw+π/2 方向）。
+     * @brief [已废弃] 计算通道两侧墙壁的 AABB
      */
     ChannelWalls computeChannelWalls(const std::array<double, 5>& target_state) const;
+
+    // ── Phase 3 v0.1 新增 ────────────────────────────────────
+
+    /**
+     * @brief 根据拦截模式计算虚拟目标（alg_phase3_v01.md §2.4）
+     * @param target_state 实际目标 5D 状态 [x,y,z,yaw,pitch]
+     * @param mode         拦截模式："tail"(尾追) / "head-on"(迎头)
+     * @param L            偏移距离 (m)
+     * @return 虚拟目标 [x, y, z, yaw, pitch]
+     */
+    static std::array<double, 5> computeVirtualGoal(
+        const std::array<double, 5>& target_state,
+        const std::string& mode,
+        double L);
 
     // ── 访问器 ───────────────────────────────────────────────
     const std::string& getType()          const { return traj_type_; }

@@ -50,7 +50,7 @@ add_dependencies(uav_guide_env_core
   ${catkin_EXPORTED_TARGETS}
 )
 
-# ── simulation_loop 节点（Phase 2c）─────────────────────────
+# ── simulation_loop 节点（Phase 3 v0.1）─────────────────────
 add_executable(simulation_loop
   src/simulation_loop.cpp
 )
@@ -61,6 +61,15 @@ target_link_libraries(simulation_loop
 add_dependencies(simulation_loop
   beam_dubins_generate_messages_cpp
   ${catkin_EXPORTED_TARGETS}
+)
+
+# ── target_publisher 节点（Phase 3 v0.1 新增）───────────────
+add_executable(target_publisher
+  src/target_publisher.cpp
+)
+target_link_libraries(target_publisher
+  uav_guide_env_core
+  ${catkin_LIBRARIES}
 )
 
 # ── rviz_publisher 节点（Phase 3）───────────────────────────

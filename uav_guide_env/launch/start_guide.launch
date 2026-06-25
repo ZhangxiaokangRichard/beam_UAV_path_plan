@@ -1,24 +1,19 @@
 <launch>
     <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- Beam Dubins 无人机引导仿真 — 全栈启动文件                 -->
+    <!-- Beam Dubins 无人机引导仿真 — 全栈启动文件 (Phase 3 v0.1)    -->
     <!--                                                           -->
-    <!-- 包含：规划服务 → 仿真循环 → 可视化发布 → Rviz             -->
-    <!--                                                           -->
-    <!-- 启动：roslaunch uav_guide_env start_guide.launch            -->
-    <!--                                                           -->
-    <!-- 分步调试建议：                                             -->
-    <!--   先启动 rviz.launch  验证可视化                          -->
-    <!--   再启动 start_guide.launch 验证完整链路                   -->
+    <!-- 节点启动顺序：规划服务 → 目标发布 → 可视化 → 仿真循环 → Rviz -->
     <!-- ═══════════════════════════════════════════════════════════ -->
 
     <!-- ═══════ 1. 算法层：规划服务节点 ═══════════════════════ -->
     <include file="$(find beam_dubins)/launch/planner.launch"/>
 
-    <!-- ═══════ 2. 环境参数加载 ═══════════════════════════════ -->
+    <!-- ═══════ 2. 目标轨迹节点（独立发布 /target/* 话题）═════ -->
+    <include file="$(find uav_guide_env)/launch/target_publisher.launch"/>
+
+    <!-- ═══════ 3. 环境参数加载 ═══════════════════════════════ -->
     <rosparam file="$(find uav_guide_env)/config/uav_dynamics.yaml"
               command="load" ns="uav"/>
-    <rosparam file="$(find uav_guide_env)/config/target_trajectory.yaml"
-              command="load" ns="target"/>
     <rosparam file="$(find uav_guide_env)/config/scenario.yaml"
               command="load" ns="scenario"/>
 
@@ -28,27 +23,14 @@
     <rosparam ns="space" param="lz">1000.0</rosparam>
     <rosparam ns="space" param="boundary_margin">50.0</rosparam>
 
-    <!-- 仿真参数 -->
-    <rosparam ns="simulation" param="dt">0.1</rosparam>
-    <rosparam ns="simulation" param="plan_interval">2</rosparam>
-    <rosparam ns="simulation" param="beam_reset_interval">30</rosparam>
+    <!-- ═══════ 4. 可视化发布节点 ═══════════════════════════ -->
+    <node name="rviz_publisher" pkg="uav_guide_env" type="rviz_publisher" output="screen"/>
 
-    <!-- ═══════ 3. TF 基础帧 ═════════════════════════════════ -->
-    <node pkg="tf" type="static_transform_publisher" name="map_to_odom"
-          args="0 0 0 0 0 0 map odom 100"/>
+    <!-- ═══════ 5. 仿真主循环 ═══════════════════════════════ -->
+    <node name="simulation_loop" pkg="uav_guide_env" type="simulation_loop" output="screen"/>
 
-    <!-- ═══════ 4. 可视化发布节点（先启动，确保 Rviz 加载时已有数据） ══ -->
-    <node name="rviz_publisher" pkg="uav_guide_env"
-          type="rviz_publisher" output="screen" required="true">
-    </node>
-
-    <!-- ═══════ 5. 仿真主循环（最后启动，等待规划服务就绪） ══ -->
-    <node name="simulation_loop" pkg="uav_guide_env"
-          type="simulation_loop" output="screen" required="true"/>
-
-    <!-- ═══════ 6. Rviz 3D 可视化（延迟启动，等待话题就绪） ══ -->
+    <!-- ═══════ 6. Rviz 3D 可视化 ═══════════════════════════ -->
     <node name="rviz" pkg="rviz" type="rviz"
           args="-d $(find uav_guide_env)/config/rviz/beam_dubins_3d.rviz"
-          launch-prefix="bash -c 'sleep 2; exec $0 $@'"
           required="false"/>
 </launch>

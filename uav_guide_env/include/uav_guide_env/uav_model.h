@@ -31,7 +31,7 @@ struct UAVState {
  * @brief 固定翼无人机运动学模型
  *
  * 规划约束参数 (V, R_min, gamma_max, r_body) 供规划层只读访问。
- * 运动学方法 (step, advanceAlongPath) 供仿真循环调用。
+ * 运动学方法 (step, interpolateAlongPathWithYawLimit) 供仿真循环调用。
  */
 class FixedWingUAV {
 public:
@@ -63,21 +63,21 @@ public:
     // ── 路径跟随（高层级，沿离散路径推进）──────────────────
 
     /**
-     * @brief 沿路径推进一段距离（"只进不退指针"策略）
+     * @brief 带偏航角约束的连续位置插值路径跟踪（uav_dynamicR2.md）
      *
-     * 从 Python beam_dubins_2d_dynamic.py → _advance_uav() 迁移。
+     * 位置沿路径点几何插值推进，航向以 lookahead 纯追踪方式平滑转向。
      * 路径耗尽时朝目标方向死推算。
-     *
-     * @param pose       UAV 当前状态 [x, y, z, yaw, pitch]（输入输出）
-     * @param path       待跟随的路径点列 [[x,y,z,yaw], ...]
-     * @param path_ptr   路径推进指针（输入输出，只增不减）
-     * @param last_path_id 上次路径的标识（输入输出，用于检测路径更新）
-     * @param goal       目标位置 [x, y, z, yaw, pitch]（死推算用）
-     * @param distance   本次推进距离 (m) = V × dt
      */
-    void advanceAlongPath(std::array<double, 5>& pose,
-                          const std::vector<std::array<double, 4>>& path,
-                          int& path_ptr, size_t& last_path_gen,
+    void interpolateAlongPathWithYawLimit(
+        std::array<double, 5>& pose,
+        const std::vector<std::array<double, 4>>& path,
+        int& path_ptr, size_t& last_path_gen,
+        const std::array<double, 5>& goal,
+        double distance,
+        int lookahead_n = 5) const;
+
+    /// 朝目标方向死推算（位置直线插值 + 航向 Dubins 约束）
+    void deadReckonToward(std::array<double, 5>& pose,
                           const std::array<double, 5>& goal,
                           double distance) const;
 
@@ -97,11 +97,6 @@ public:
     double getSimDt()           const { return dt_; }
 
 private:
-    /// 朝目标方向直线死推算（路径耗尽时的兜底策略）
-    void deadReckonToward(std::array<double, 5>& pose,
-                          const std::array<double, 5>& goal,
-                          double distance) const;
-
     // ── 运动学参数 ──
     double V_;           // 巡航速度 (m/s)
     double R_min_;       // 最小水平转弯半径 (m)

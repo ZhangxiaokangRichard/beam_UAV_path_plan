@@ -60,78 +60,84 @@ std::array<double, 5> FixedWingUAV::step(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 沿路径推进（"只进不退指针"策略）
+// 带偏航角约束的连续位置插值路径跟踪（uav_dynamicR2.md）
+// 核心思路：位置沿路径几何插值推进 + 航向 lookahead 纯追踪 + Dubins 速率限制
 // ═══════════════════════════════════════════════════════════════
 
-void FixedWingUAV::advanceAlongPath(
+void FixedWingUAV::interpolateAlongPathWithYawLimit(
     std::array<double, 5>& pose,
     const std::vector<std::array<double, 4>>& path,
     int& path_ptr, size_t& last_path_gen,
     const std::array<double, 5>& goal,
-    double distance) const
+    double distance,
+    int lookahead_n) const
 {
     if (path.empty()) {
-        // 无路径 → 朝目标方向死推算
         deadReckonToward(pose, goal, distance);
         return;
     }
 
-    // ── 路径更新检测由调用方处理（simulation_loop 通过 path_generation 判断）──
     double dist_left = distance;
+    const double max_dpsi = (V_ / R_min_) * dt_;  // 每周期最大航向变化
 
     while (dist_left > 1e-3 && path_ptr < static_cast<int>(path.size()) - 1) {
         const auto& nxt = path[path_ptr + 1];
         double dx = nxt[0] - pose[0];
         double dy = nxt[1] - pose[1];
-        double d = std::sqrt(dx * dx + dy * dy);
+        double d_to_nxt = std::sqrt(dx * dx + dy * dy);
 
-        if (d < 1e-3) {
-            // 已到达该路径点 → 跳到下一个
+        // ── 位置更新：沿路径几何连续插值推进 ──────────────
+        if (d_to_nxt < 1e-3) {
             path_ptr++;
             continue;
         }
-
-        if (d <= dist_left) {
-            // 完整跨越该路径点
+        if (d_to_nxt <= dist_left) {
             pose[0] = nxt[0];
             pose[1] = nxt[1];
-            // z 如有变化也可跟随
             if (nxt.size() > 2) pose[2] = nxt[2];
-            // 航向从路径点获取
-            if (path[path_ptr + 1].size() > 3) {
-                pose[3] = path[path_ptr + 1][3];
-            }
             path_ptr++;
-            dist_left -= d;
+            dist_left -= d_to_nxt;
         } else {
-            // 部分插值推进
-            double ratio = dist_left / d;
+            double ratio = dist_left / d_to_nxt;
             pose[0] += ratio * dx;
             pose[1] += ratio * dy;
-            // 航向平滑插值
-            if (path[path_ptr + 1].size() > 3) {
-                double psi_target = path[path_ptr + 1][3];
-                double dpsi = psi_target - pose[3];
-                // 规范角度差到 (-π, π]
-                while (dpsi >  M_PI) dpsi -= 2.0 * M_PI;
-                while (dpsi < -M_PI) dpsi += 2.0 * M_PI;
-                pose[3] += ratio * dpsi;
-                // 规范到 (-π, π]
-                while (pose[3] >  M_PI) pose[3] -= 2.0 * M_PI;
-                while (pose[3] < -M_PI) pose[3] += 2.0 * M_PI;
-            }
             dist_left = 0.0;
         }
+
+        // ── 航向更新：lookahead 纯追踪 + Dubins 速率限制 ──
+        int la_idx = std::min(path_ptr + lookahead_n,
+                              static_cast<int>(path.size()) - 1);
+        const auto& la = path[la_idx];
+        double psi_desired = std::atan2(la[1] - pose[1], la[0] - pose[0]);
+
+        // 航向混合：若 lookahead 点有规划航向且差距 < 45°，则信任规划航向
+        if (la.size() > 3) {
+            double psi_path = la[3];
+            double dpsi_mix = psi_path - psi_desired;
+            while (dpsi_mix >  M_PI) dpsi_mix -= 2.0 * M_PI;
+            while (dpsi_mix < -M_PI) dpsi_mix += 2.0 * M_PI;
+            if (std::abs(dpsi_mix) < M_PI / 4.0) {
+                psi_desired = psi_path;
+            }
+        }
+
+        double dpsi = psi_desired - pose[3];
+        while (dpsi >  M_PI) dpsi -= 2.0 * M_PI;
+        while (dpsi < -M_PI) dpsi += 2.0 * M_PI;
+        double dpsi_actual = std::clamp(dpsi, -max_dpsi, max_dpsi);
+        pose[3] += dpsi_actual;
     }
 
-    // 路径耗尽 → 朝目标方向死推算
+    // 路径耗尽 → 死推算
     if (dist_left > 1e-3) {
         deadReckonToward(pose, goal, dist_left);
     }
+    while (pose[3] >  M_PI) pose[3] -= 2.0 * M_PI;
+    while (pose[3] < -M_PI) pose[3] += 2.0 * M_PI;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 死推算（路径耗尽时的兜底策略）
+// 死推算（位置直线插值 + 航向 Dubins 约束）
 // ═══════════════════════════════════════════════════════════════
 
 void FixedWingUAV::deadReckonToward(
@@ -144,11 +150,24 @@ void FixedWingUAV::deadReckonToward(
     double dist_to_goal = std::sqrt(dx * dx + dy * dy);
     if (dist_to_goal < 1e-6) return;
 
-    double step = std::min(distance, dist_to_goal);
-    double psi  = std::atan2(dy, dx);
-    pose[0] += step * std::cos(psi);
-    pose[1] += step * std::sin(psi);
-    pose[3] = psi;
+    double fly_dist = std::min(distance, dist_to_goal);
+
+    // ── 位置：朝目标直线插值推进 ──────────────────────────
+    double ratio = fly_dist / dist_to_goal;
+    pose[0] += ratio * dx;
+    pose[1] += ratio * dy;
+
+    // ── 航向：Dubins 约束平滑转向 ──────────────────────────
+    double psi_desired = std::atan2(dy, dx);
+    double dpsi = psi_desired - pose[3];
+    while (dpsi >  M_PI) dpsi -= 2.0 * M_PI;
+    while (dpsi < -M_PI) dpsi += 2.0 * M_PI;
+    double dpsi_max = fly_dist / R_min_;
+    double dpsi_actual = std::clamp(dpsi, -dpsi_max, dpsi_max);
+    pose[3] += dpsi_actual;
+
+    while (pose[3] >  M_PI) pose[3] -= 2.0 * M_PI;
+    while (pose[3] < -M_PI) pose[3] += 2.0 * M_PI;
 }
 
 // ═══════════════════════════════════════════════════════════════

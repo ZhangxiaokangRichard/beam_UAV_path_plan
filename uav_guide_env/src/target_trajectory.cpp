@@ -122,6 +122,31 @@ ChannelWalls TargetTrajectory::computeChannelWalls(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Phase 3 v0.1：虚拟目标计算（alg_phase3_v01.md §2.4）
+// ═══════════════════════════════════════════════════════════════
+
+std::array<double, 5> TargetTrajectory::computeVirtualGoal(
+    const std::array<double, 5>& target_state,
+    const std::string& mode,
+    double L)
+{
+    double tx = target_state[0], ty = target_state[1], tz = target_state[2];
+    double psi = target_state[3], theta = target_state[4];
+    double c = std::cos(psi), s = std::sin(psi);
+
+    if (mode == "head-on") {
+        // 迎头截击：目标前方 L 米，航向反向（面对面）
+        double front_yaw = psi + M_PI;
+        while (front_yaw >  M_PI) front_yaw -= 2.0 * M_PI;
+        while (front_yaw < -M_PI) front_yaw += 2.0 * M_PI;
+        return {tx + L * c, ty + L * s, tz, front_yaw, theta};
+    } else {
+        // 尾追（默认）：目标后方 L 米，航向同向
+        return {tx - L * c, ty - L * s, tz, psi, theta};
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // static：静止目标
 // ═══════════════════════════════════════════════════════════════
 
