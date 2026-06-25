@@ -5,7 +5,7 @@
 
 initial_position: [3000.0, 1500.0, 600.0]  # [x, y, z]
 # initial_heading_deg: 90                      # 初始航向 (°)
-trajectory_type: "circle"                     # static / line / racetrack / circle
+trajectory_type: "line"                     # static / line / racetrack / circle
 
 trajectories:
   static:
