@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>beam_dubins</name>
+  <version>0.1.0</version>
+  <description>
+    Beam Dubins 全局路径规划算法包（Phase 1：纯 C++ 核心算法库）。
+    提供基于受限宽度束搜索 (Beam Search) 的 Dubins 路径规划，
+    支持固定翼 UAV 最小转弯半径约束下的 2D/3D 路径搜索。
+    算法层不依赖 ROS 图形化，可独立编译和单元测试。
+  </description>
+
+  <maintainer email="ros-dev@example.com">ros-dev</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>message_generation</depend>
+  <depend>message_runtime</depend>
+
+  <test_depend>rosunit</test_depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+  </export>
+</package>

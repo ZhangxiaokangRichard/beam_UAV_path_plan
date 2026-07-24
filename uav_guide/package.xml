@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>uav_guide</name>
+  <version>0.1.0</version>
+  <description>
+    UAV path guidance: subscribe own/target state, plan via beam_dubins,
+    publish WGS84 guide points for ground-station / MQTT forwarding.
+  </description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>beam_dubins</build_depend>
+
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>beam_dubins</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+
+  <export>
+  </export>
+</package>

@@ -1,0 +1,35 @@
+# ── Beam Dubins 路径规划服务 ────────────────────────
+# 算法层对外暴露的唯一接口
+
+std_msgs/Header header
+  uint32 seq
+  time stamp
+  string frame_id            # 参考坐标系（应为 "map"）
+
+# ── 规划起点（5D 状态：x, y, z, yaw, pitch）───────
+float64[5] start
+
+# ── 规划终点（5D 状态：x, y, z, yaw, pitch）───────
+float64[5] goal
+
+# ── 搜索空间边界 ────────────────────────────────────
+float64 space_lx             # X 方向最大范围 (m)，起点处 X=0
+float64 space_ly             # Y 方向最大范围 (m)
+float64 space_lz             # Z 方向最大范围 (m)
+float64 boundary_margin      # 边界安全距离 (m)，UAV 不得进入 [0,margin] 和 [L-margin, L]
+
+# ── 障碍物列表（当前环境快照）───────────────────────
+beam_dubins/Obstacle[] obstacles
+
+# ── 规划选项 ────────────────────────────────────────
+float32 time_limit_ms        # 规划超时限制（ms），0 表示不限制
+bool use_3d                  # 是否启用 3D 垂直规划（Phase 4+）；false=2D 模式（γ≡0）
+---
+# ── 规划响应 ────────────────────────────────────────
+bool success                 # 是否成功找到到达目标的完整路径
+float64 cost                 # 路径总长度 (m)
+beam_dubins/PathPoint[] path # 路径点序列（从起点到终点，按前进方向排列）
+int32 nodes_explored         # 搜索过程中探索的节点总数
+int32 depth_reached          # 搜索到达的最大深度层数
+float64 planning_time_ms     # 实际规划耗时 (ms)
+string status_message        # 状态简述："goal reached" / "partial path" / "timeout" / "no solution"

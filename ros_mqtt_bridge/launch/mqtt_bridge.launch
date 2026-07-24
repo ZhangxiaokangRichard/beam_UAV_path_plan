@@ -1,0 +1,5 @@
+<launch>
+    <rosparam file="$(find ros_mqtt_bridge)/config/mqtt_bridge.yaml" command="load"/>
+    <node name="mqtt_ros_bridge" pkg="ros_mqtt_bridge" type="mqtt_target_bridge" output="screen"/>
+    <!-- <node name="mqtt_waypoint_bridge" pkg="ros_mqtt_bridge" type="mqtt_waypoint_bridge" output="screen"/> -->
+</launch>

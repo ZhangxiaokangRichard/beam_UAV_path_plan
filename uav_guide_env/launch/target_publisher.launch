@@ -1,0 +1,17 @@
+<launch>
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- 目标轨迹发布节点 (Phase 3 v0.1)                            -->
+    <!--                                                           -->
+    <!-- 加载 target_trajectory.yaml，发布：                         -->
+    <!--   /target/state          — 实际目标位姿 (10Hz)             -->
+    <!--   /target/virtual_goal   — 虚拟目标偏移点 (10Hz)           -->
+    <!--   /target/intercept_mode — 拦截模式 latched               -->
+    <!--   /target/trajectory_pred — 目标预测轨迹 (1Hz)            -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+
+    <rosparam file="$(find uav_guide_env)/config/target_trajectory.yaml"
+              command="load" ns="target"/>
+
+    <node name="target_publisher" pkg="uav_guide_env" type="target_publisher"
+          output="screen"/>
+</launch>

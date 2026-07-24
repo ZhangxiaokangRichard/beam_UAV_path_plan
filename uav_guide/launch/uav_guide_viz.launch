@@ -1,0 +1,7 @@
+<launch>
+  <node pkg="uav_guide" type="uav_guide_route_viz.py" name="uav_guide_route_viz" output="screen">
+    <param name="save_path" value="/tmp/uav_guide_route.png"/>
+    <param name="update_hz" value="1.0"/>
+    <param name="gui" value="false"/>
+  </node>
+</launch>

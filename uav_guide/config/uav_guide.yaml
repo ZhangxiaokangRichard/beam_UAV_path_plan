@@ -1,0 +1,58 @@
+# ═══════════════════════════════════════════════════════════════
+# uav_guide 引导配置
+# ═══════════════════════════════════════════════════════════════
+
+inputs:
+  uav_topic: /uav/state
+  target_topic: /target/state
+
+# 拦截模式：head-on | tail（启动默认；运行中可通过话题热切换）
+intercept_mode: head-on
+intercept_mode_topic: /uav_guide/intercept_mode_cmd
+intercept_mode_status_topic: /uav_guide/intercept_mode
+
+planning:
+  service: /beam_dubins/plan_path
+  frame_id: map
+  time_limit_ms: 0.0
+  use_3d: false
+
+target:
+  approach_distance_tail: 1500.0
+  approach_distance_headon: 1800.0
+  tracking_entry_dist: 1900.0
+  tracking_window: 100.0
+  divergence_threshold: 3
+  velocity_align_deg: 70.0
+  min_closure_m: 3.0          # head-on：每帧接近量 (m)
+  min_closure_m_tail: 1.5     # tail：尾追相对接近较慢，阈值更低
+  entry_hold_count: 1
+
+# TRACKING 模式对外引导点偏移（飞控圆心盘旋，近似直飞目标）
+finalshot:
+  offset_m: 50
+  radius_m: 500.0
+
+segmentation:
+  curvature_eps: 0.0001
+  yaw_segment_eps: 0.03
+  default_turn_radius_m: 500.0
+
+space:
+  lx: 10000.0
+  ly: 5000.0
+  lz: 1000.0
+  boundary_margin: 50.0
+
+guide_point:
+  topic: /uav/guide_point
+  publish_rate_hz: 5.0
+
+output:
+  planned_path_topic: /uav/planned_path
+
+# launch 未加载 mqtt_bridge.yaml 时的后备原点（应与 ros_mqtt_bridge 一致）
+geodesy:
+  origin_latitude_deg: 34.01396246
+  origin_longitude_deg: 116.92349937
+  origin_altitude_m: 0.0
