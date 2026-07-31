@@ -19,20 +19,20 @@ planning:
 
 target:
   approach_distance_tail: 1500.0
-  approach_distance_headon: 2300.0
-  tracking_entry_dist: 2400.0
+  approach_distance_headon: 1800.0
+  tracking_entry_dist: 1900.0
   tracking_window: 100.0
   divergence_threshold: 3
-  velocity_align_deg: 70
+  velocity_align_deg: 90.0
   min_closure_m: 3.0          # head-on：每帧接近量 (m)
   min_closure_m_tail: 1.5     # tail：尾追相对接近较慢，阈值更低
   entry_hold_count: 1
 
 # TRACKING 模式对外引导点偏移（飞控圆心盘旋，近似直飞目标）
 finalshot:
-  offset_m_t: 750
-  offset_m: 50
-  radius_m: 10.0
+  
+	offset_m: 750
+  radius_m: 500.0
 
 segmentation:
   curvature_eps: 0.0001

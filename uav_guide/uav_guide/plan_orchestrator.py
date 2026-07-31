@@ -51,7 +51,8 @@ class PlanOrchestrator:
         self.entry_hold_count = int(target_cfg.get("entry_hold_count", 2))
 
         fs_cfg = config.get("finalshot", {})
-        self._guide_offset_m = float(fs_cfg.get("offset_m", 750.0))
+        self._guide_offset_m = float(fs_cfg.get("offset_m", 50.0))
+        self._guide_offset_m_t = float(fs_cfg.get("offset_m_t", 700.0))
         self._guide_radius_m = float(fs_cfg.get("radius_m", 500.0))
         self._geo_cfg = config.get("geodesy", {})
 
@@ -95,7 +96,7 @@ class PlanOrchestrator:
         target_state: List[float],
         intercept_mode: str,
     ) -> tuple:
-        gx, gy = compute_offset_goal_xy(target_state, intercept_mode, self._guide_offset_m)
+        gx, gy = compute_offset_goal_xy(target_state, intercept_mode, self._guide_offset_m, self._guide_offset_m_t)
         geo = self._geodesy().to_geodetic(gx, gy, target_state[2])
         target_geo = self._geodesy().to_geodetic(target_state[0], target_state[1], target_state[2])
         return gx, gy, geo.longitude_deg, geo.latitude_deg, target_geo.altitude_m

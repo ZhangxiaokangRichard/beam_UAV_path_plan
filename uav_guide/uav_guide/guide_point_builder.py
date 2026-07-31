@@ -16,12 +16,16 @@ from uav_guide.path_segmenter import (
 )
 
 
-def compute_offset_goal_xy(target: Sequence[float], intercept_mode: str, offset_m: float) -> Tuple[float, float]:
+def compute_offset_goal_xy(target: Sequence[float], intercept_mode: str, offset_m: float, offset_m_t: float) -> Tuple[float, float]:
     """head-on：目标身后；tail：目标前方。"""
     psi = target[3]
     sign = -1.0 if intercept_mode == "head-on" else 1.0
-    x = target[0] + sign * offset_m * math.cos(psi)
-    y = target[1] + sign * offset_m * math.sin(psi)
+    if intercept_mode == "head-on":
+        x = target[0] + sign * (offset_m + 0.4*offset_m_t) * math.cos(psi)
+        y = target[1] + sign * (offset_m + 0.4*offset_m_t) * math.sin(psi)
+    else:
+        x = target[0] + sign * (offset_m + offset_m_t) * math.cos(psi)
+        y = target[1] + sign * (offset_m + offset_m_t) * math.sin(psi)
     return x, y
 
 
@@ -37,8 +41,9 @@ class GuidePointBuilder:
         self._default_radius_m = float(seg_cfg.get("default_turn_radius_m", 500.0))
 
         fs_cfg = config.get("finalshot", {})
-        self._offset_m = float(fs_cfg.get("offset_m", 750.0))
-        self._offset_radius_m = float(fs_cfg.get("radius_m", 500.0))
+        self._offset_m = float(fs_cfg.get("offset_m", 50.0))
+        self._offset_m_t = float(fs_cfg.get("offset_m_t", 750.0))
+        self._offset_radius_m = float(fs_cfg.get("radius_m", 300.0))
 
         self._geodesy = geodesy
 
@@ -131,7 +136,7 @@ class GuidePointBuilder:
         intercept_mode: str,
         alt_wgs84: float,
     ) -> Tuple[float, float, float, float]:
-        x, y = compute_offset_goal_xy(target_state, intercept_mode, self._offset_m)
+        x, y = compute_offset_goal_xy(target_state, intercept_mode, self._offset_m, self._offset_m_t)
         geo = self._geodesy.to_geodetic(x, y, target_state[2])
         return geo.longitude_deg, geo.latitude_deg, alt_wgs84, self._offset_radius_m
 
