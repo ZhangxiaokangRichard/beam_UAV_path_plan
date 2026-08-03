@@ -115,6 +115,39 @@ pid_t runDetached(const std::string& shell_cmd, const std::string& log_file)
     return pid;
 }
 
+/// 打开 xterm 终端运行命令（用户可实时观察 launch / rosrun 输出）。
+/// 无 DISPLAY（无图形会话）时回退为后台日志方式。返回进程 PID。
+pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
+                       const std::string& log_file)
+{
+    const char* display = std::getenv("DISPLAY");
+    if (display && display[0] != '\0') {
+        const pid_t pid = fork();
+        if (pid < 0) return -1;
+        if (pid == 0) {
+            setsid();
+            // -hold：进程退出后保留窗口，便于查看启动错误；停止时由进程组信号一并关闭
+            execlp("xterm", "xterm", "-hold", "-T", title.c_str(),
+                   "-geometry", "140x36", "-e", "bash", "-c", shell_cmd.c_str(),
+                   static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        return pid;
+    }
+    ROS_WARN("[mqtt_mssn_bridge] DISPLAY 未设置，回退为后台日志方式启动 %s",
+             title.c_str());
+    return runDetached(shell_cmd, log_file);
+}
+
+/// 拼接启动命令：去除 setup_shell 首尾空白（YAML 块标量自带尾随换行，
+/// 直接拼 " && exec" 会产生 "行首 &&" 的 bash 语法错误）。
+std::string buildLaunchCmd(const std::string& setup_shell, const std::string& exec_part)
+{
+    const std::string shell = trim(setup_shell);
+    if (shell.empty()) return exec_part;
+    return shell + " && " + exec_part;
+}
+
 /// 停止某进程组：先 SIGTERM 优雅退出，超时后 SIGKILL。
 void stopProcessGroup(pid_t pid)
 {
@@ -327,12 +360,13 @@ private:
             ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch already running");
             return;
         }
-        const std::string cmd = cfg_.setup_shell + " && exec roslaunch " +
-                                cfg_.launch_pkg + " " + cfg_.launch_file;
+        const std::string cmd = buildLaunchCmd(
+            cfg_.setup_shell,
+            "exec roslaunch " + cfg_.launch_pkg + " " + cfg_.launch_file);
         const std::string log = cfg_.log_dir + "/uav_guide_launch.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting roslaunch %s %s",
+        ROS_INFO("[mqtt_mssn_bridge] starting roslaunch %s %s (new xterm)",
                  cfg_.launch_pkg.c_str(), cfg_.launch_file.c_str());
-        nav_pid_ = runDetached(cmd, log);
+        nav_pid_ = launchInTerminal("uav_guide.launch", cmd, log);
         for (int i = 0; i < cfg_.launch_timeout_s * 2; ++i) {
             if (pgrep(cfg_.launch_match)) {
                 ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch started");
@@ -340,7 +374,8 @@ private:
             }
             usleep(500000);
         }
-        ROS_ERROR("[mqtt_mssn_bridge] uav_guide.launch start timeout, see %s", log.c_str());
+        ROS_ERROR("[mqtt_mssn_bridge] uav_guide.launch start timeout, "
+                  "check the xterm window or %s", log.c_str());
     }
 
     void startWaypoint()
@@ -350,11 +385,12 @@ private:
             ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge already running");
             return;
         }
-        const std::string cmd = cfg_.setup_shell +
-                                " && exec rosrun ros_mqtt_bridge mqtt_waypoint_bridge";
+        const std::string cmd = buildLaunchCmd(
+            cfg_.setup_shell,
+            "exec rosrun ros_mqtt_bridge mqtt_waypoint_bridge");
         const std::string log = cfg_.log_dir + "/mqtt_waypoint_bridge.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting mqtt_waypoint_bridge");
-        waypoint_pid_ = runDetached(cmd, log);
+        ROS_INFO("[mqtt_mssn_bridge] starting mqtt_waypoint_bridge (new xterm)");
+        waypoint_pid_ = launchInTerminal("mqtt_waypoint_bridge", cmd, log);
         for (int i = 0; i < cfg_.waypoint_timeout_s * 2; ++i) {
             if (pgrep(cfg_.waypoint_match)) {
                 ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge started");
@@ -362,7 +398,8 @@ private:
             }
             usleep(500000);
         }
-        ROS_ERROR("[mqtt_mssn_bridge] mqtt_waypoint_bridge start timeout, see %s", log.c_str());
+        ROS_ERROR("[mqtt_mssn_bridge] mqtt_waypoint_bridge start timeout, "
+                  "check the xterm window or %s", log.c_str());
     }
 
     void stopWaypoint()

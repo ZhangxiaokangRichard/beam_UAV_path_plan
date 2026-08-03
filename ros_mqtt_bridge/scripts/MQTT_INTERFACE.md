@@ -144,6 +144,8 @@ flowchart LR
 
 **用途**：远程启动/停止导航服务（等效执行 `roslaunch uav_guide uav_guide.launch`）。
 
+> 启动时会在桌面**新建 xterm 终端**运行 launch，可实时查看 ROS 输出；停止时自动关闭该终端。无图形会话（`DISPLAY` 未设置）时回退为后台日志（`~/.ros/mqtt_mssn_bridge/logs/`）。
+
 ```json
 { "start": true }   // 启动
 { "start": false }  // 停止
@@ -157,6 +159,8 @@ flowchart LR
 ### 3.5 `aoa/ai_guide/guide/cmd` — 引导动作启停
 
 **用途**：远程启动/停止引导动作（等效执行 `rosrun ros_mqtt_bridge mqtt_waypoint_bridge`）。
+
+> 启动时会在桌面**新建 xterm 终端**运行 `mqtt_waypoint_bridge`；停止时自动关闭该终端。无图形会话时回退为后台日志。
 
 ```json
 { "start": true }   // 启动
