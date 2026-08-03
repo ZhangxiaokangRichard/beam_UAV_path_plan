@@ -146,6 +146,11 @@ add_executable(mqtt_waypoint_bridge src/mqtt_waypoint_bridge.cpp)
 target_link_libraries(mqtt_waypoint_bridge ros_mqtt_bridge_core ${catkin_LIBRARIES})
 add_dependencies(mqtt_waypoint_bridge ${catkin_EXPORTED_TARGETS})
 
+add_executable(mqtt_mssn_bridge src/mqtt_mssn_bridge.cpp)
+target_link_libraries(mqtt_mssn_bridge ros_mqtt_bridge_core ${catkin_LIBRARIES})
+add_dependencies(mqtt_mssn_bridge ${catkin_EXPORTED_TARGETS})
+set_target_properties(mqtt_mssn_bridge PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure

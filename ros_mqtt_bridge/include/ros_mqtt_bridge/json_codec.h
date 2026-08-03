@@ -36,4 +36,18 @@ std::string encodeRouteStatus(std::uint32_t route_id, const std::string& status,
 std::string encodeFlyPoint(double lon_deg, double lat_deg,
                            double alt_m, double radius_m);
 
+/** 解析 {"<key>": <bool>} 状态/命令载荷（如 nav/guide 启停）。 */
+bool decodeStateBool(const std::string& payload, const std::string& key,
+                     bool& value, std::string& error);
+
+/** 解析 {"<key>": "<string>"} 状态/命令载荷（如拦截模式）。 */
+bool decodeStateString(const std::string& payload, const std::string& key,
+                       std::string& value, std::string& error);
+
+/** 编码 {"<key>": <bool>} 状态载荷。 */
+std::string encodeStateBool(const std::string& key, bool value);
+
+/** 编码 {"<key>": "<string>"} 状态载荷。 */
+std::string encodeStateString(const std::string& key, const std::string& value);
+
 }  // namespace ros_mqtt_bridge

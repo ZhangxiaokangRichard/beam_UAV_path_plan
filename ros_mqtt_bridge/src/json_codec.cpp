@@ -250,4 +250,48 @@ std::string encodeFlyPoint(double lon_deg, double lat_deg,
     return stream.str();
 }
 
+bool decodeStateBool(const std::string& payload, const std::string& key,
+                     bool& value, std::string& error)
+{
+    try {
+        std::stringstream stream(payload);
+        ptree tree;
+        boost::property_tree::read_json(stream, tree);
+        const auto optional = tree.get_optional<bool>(key);
+        if (!optional) { error = "missing field: " + key; return false; }
+        value = *optional;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool decodeStateString(const std::string& payload, const std::string& key,
+                       std::string& value, std::string& error)
+{
+    try {
+        std::stringstream stream(payload);
+        ptree tree;
+        boost::property_tree::read_json(stream, tree);
+        const auto optional = tree.get_optional<std::string>(key);
+        if (!optional) { error = "missing field: " + key; return false; }
+        value = *optional;
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+std::string encodeStateBool(const std::string& key, bool value)
+{
+    return "{\"" + key + "\":" + (value ? "true" : "false") + "}";
+}
+
+std::string encodeStateString(const std::string& key, const std::string& value)
+{
+    return "{\"" + key + "\":\"" + value + "\"}";
+}
+
 }  // namespace ros_mqtt_bridge

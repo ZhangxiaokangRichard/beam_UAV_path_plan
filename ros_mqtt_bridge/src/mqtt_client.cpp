@@ -42,10 +42,21 @@ MqttClient::~MqttClient()
     mosquitto_lib_cleanup();
 }
 
+void MqttClient::addSubscription(const std::string& topic, int qos)
+{
+    if (topic.empty()) return;
+    subscriptions_.push_back({topic, qos < 0 ? qos_ : qos});
+}
+
 bool MqttClient::start(const std::string& subscription_topic)
 {
     if (!mosq_) return false;
-    subscription_topic_ = subscription_topic;
+    // 兼容旧的单话题接口：传入 topic 时清空并以该话题作为唯一订阅；
+    // 若已通过 addSubscription() 添加多话题，则保留这些订阅。
+    if (!subscription_topic.empty()) {
+        subscriptions_.clear();
+        subscriptions_.push_back({subscription_topic, qos_});
+    }
     // 使用异步连接，避免 Broker 暂不可用时阻塞 ROS 节点启动。
     if (mosquitto_connect_async(mosq_, host_.c_str(), port_, keepalive_) != MOSQ_ERR_SUCCESS)
         return false;
@@ -65,8 +76,12 @@ void MqttClient::onConnect(mosquitto* mosq, void* userdata, int result)
     auto* client = static_cast<MqttClient*>(userdata);
     client->connected_ = result == MOSQ_ERR_SUCCESS;
     // 每次重连都重新订阅；订阅状态不能假定会跨 TCP 连接保留。
-    if (client->connected_ && !client->subscription_topic_.empty())
-        mosquitto_subscribe(mosq, nullptr, client->subscription_topic_.c_str(), client->qos_);
+    if (client->connected_) {
+        for (const auto& sub : client->subscriptions_) {
+            if (!sub.topic.empty())
+                mosquitto_subscribe(mosq, nullptr, sub.topic.c_str(), sub.qos);
+        }
+    }
 }
 
 void MqttClient::onDisconnect(mosquitto*, void* userdata, int)
