@@ -7,9 +7,9 @@ mqtt:
   target_topic: aoa/uav_center/+/uav_info
 
 geodesy:
-  origin_latitude_deg: 34.01396246
-  origin_longitude_deg: 116.92349937
-  origin_altitude_m: 0.0
+  origin_latitude_deg: 30.3379356
+  origin_longitude_deg: 104.15522171
+  origin_altitude_m: 482.0
   altitude_reference: ellipsoid
 
 target:

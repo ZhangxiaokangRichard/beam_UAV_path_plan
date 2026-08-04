@@ -176,7 +176,7 @@ static bool handle_plan_path(
     const beam_dubins::BeamConfig&   cfg)
 {
     // ── 日志：记录请求摘要 ───────────────────────────────────
-    ROS_INFO("[planner_server] 收到规划请求: "
+    ROS_INFO("[planner_server] planning request received: "
              "start=(%.0f,%.0f,%.0f, ψ=%.1f°) "
              "goal=(%.0f,%.0f,%.0f, ψ=%.1f°) "
              "obstacles=%zu",
@@ -189,7 +189,7 @@ static bool handle_plan_path(
     // ── 诊断：打印第一个障碍物 AABB ──────────────────────────
     for (size_t i = 0; i < req.obstacles.size() && i < 3; ++i) {
         const auto& o = req.obstacles[i];
-        ROS_INFO("[planner_server]   障碍物#%zu: min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) size=(%.0f×%.0f×%.0f)m",
+        ROS_INFO("[planner_server]   obstacle#%zu: min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) size=(%.0f×%.0f×%.0f)m",
                  i,
                  o.aabb_min[0], o.aabb_min[1], o.aabb_min[2],
                  o.aabb_max[0], o.aabb_max[1], o.aabb_max[2],
@@ -209,13 +209,13 @@ static bool handle_plan_path(
 
     // ── 日志：记录响应摘要 ───────────────────────────────────
     if (plan_resp.success) {
-        ROS_INFO("[planner_server] 规划成功: cost=%.1fm, "
+        ROS_INFO("[planner_server] planning succeeded: cost=%.1fm, "
                  "path_points=%zu, nodes=%d, depth=%d, time=%.1fms",
                  plan_resp.cost, plan_resp.path.size(),
                  plan_resp.nodes_explored, plan_resp.depth_reached,
                  plan_resp.planning_time_ms);
     } else {
-        ROS_WARN("[planner_server] 规划失败: %s, "
+        ROS_WARN("[planner_server] planning failed: %s, "
                  "nodes=%d, depth=%d, time=%.1fms",
                  plan_resp.status_message.c_str(),
                  plan_resp.nodes_explored, plan_resp.depth_reached,
@@ -244,7 +244,7 @@ int main(int argc, char** argv)
     ros::NodeHandle beam_nh("beam_dubins");  // 全局命名空间
     beam_dubins::BeamConfig cfg = load_config(beam_nh);
 
-    ROS_INFO("[planner_server] 参数加载完成:");
+    ROS_INFO("[planner_server] configuration loaded:");
     ROS_INFO("  beam_width=%d, beam_width_max=%d, max_depth=%d",
              cfg.beam_width, cfg.beam_width_max, cfg.max_depth);
     ROS_INFO("  max_extend=%.1fm, min_extend=%.1fm",
@@ -266,8 +266,8 @@ int main(int argc, char** argv)
             return handle_plan_path(req, res, cfg);
         });
 
-    ROS_INFO("[planner_server] 服务就绪: /beam_dubins/plan_path");
-    ROS_INFO("[planner_server] 等待规划请求...");
+    ROS_INFO("[planner_server] service ready: /beam_dubins/plan_path");
+    ROS_INFO("[planner_server] waiting for planning requests...");
 
     // ── 事件循环 ──────────────────────────────────────────────
     ros::spin();
