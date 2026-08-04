@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -49,5 +50,12 @@ std::string encodeStateBool(const std::string& key, bool value);
 
 /** 编码 {"<key>": "<string>"} 状态载荷。 */
 std::string encodeStateString(const std::string& key, const std::string& value);
+
+/** 编码 <key>: {position, orientation, linear} 字段片段（供对象内拼接）。 */
+std::string encodeUavStateField(const std::string& key, const UavStateJson& state);
+
+/** 编码 <key>: [[x,y,z,yaw,pitch,curvature], ...] 字段片段（供对象内拼接）。 */
+std::string encodePlannedPathField(const std::string& key,
+                                   const std::vector<std::array<double, 6>>& path);
 
 }  // namespace ros_mqtt_bridge

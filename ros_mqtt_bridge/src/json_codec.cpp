@@ -10,6 +10,7 @@
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <iomanip>
@@ -292,6 +293,40 @@ std::string encodeStateBool(const std::string& key, bool value)
 std::string encodeStateString(const std::string& key, const std::string& value)
 {
     return "{\"" + key + "\":\"" + value + "\"}";
+}
+
+std::string encodeUavStateField(const std::string& key, const UavStateJson& s)
+{
+    std::ostringstream o;
+    o << "\"" << key << "\":{"
+      << "\"position\":{\"x\":" << fmtJsonDouble(s.px)
+      << ",\"y\":" << fmtJsonDouble(s.py)
+      << ",\"z\":" << fmtJsonDouble(s.pz) << "},"
+      << "\"orientation\":{\"x\":" << fmtJsonDouble(s.ox)
+      << ",\"y\":" << fmtJsonDouble(s.oy)
+      << ",\"z\":" << fmtJsonDouble(s.oz)
+      << ",\"w\":" << fmtJsonDouble(s.ow) << "},"
+      << "\"linear\":{\"x\":" << fmtJsonDouble(s.vx)
+      << ",\"y\":" << fmtJsonDouble(s.vy)
+      << ",\"z\":" << fmtJsonDouble(s.vz) << "}"
+      << "}";
+    return o.str();
+}
+
+std::string encodePlannedPathField(const std::string& key,
+                                   const std::vector<std::array<double, 6>>& path)
+{
+    std::ostringstream o;
+    o << "\"" << key << "\":[";
+    for (size_t i = 0; i < path.size(); ++i) {
+        if (i) o << ",";
+        const auto& p = path[i];
+        o << "[" << fmtJsonDouble(p[0]) << "," << fmtJsonDouble(p[1]) << ","
+          << fmtJsonDouble(p[2]) << "," << fmtJsonDouble(p[3]) << ","
+          << fmtJsonDouble(p[4]) << "," << fmtJsonDouble(p[5]) << "]";
+    }
+    o << "]";
+    return o.str();
 }
 
 }  // namespace ros_mqtt_bridge

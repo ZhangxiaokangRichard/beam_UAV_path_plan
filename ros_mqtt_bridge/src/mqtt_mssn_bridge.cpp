@@ -3,16 +3,20 @@
  * @brief 导航任务远程控制桥：MQTT 命令 → ROS 进程/话题管理，状态回报。
  *
  * 融合原 guide_mqtt_bridge（Python）能力到 ros_mqtt_bridge：
- *   - 订阅 aos/ai_guide/ 命令话题，管理 uav_guide.launch 与 mqtt_waypoint_bridge
- *     进程的启停（fork + setsid + exec，日志落盘）。
+ *   - 订阅 aoa/ai_guide/ 命令话题，管理 uav_guide.launch 与 mqtt_waypoint_bridge
+ *     进程的启停（xterm 弹窗运行，无图形会话时后台日志）。
  *   - 通过 ROS Publisher 直接切换拦截模式（等效 rostopic pub -1）。
- *   - 订阅 /uav_guide/intercept_mode、读取 /uav_guide/tracking_mode，
- *     以 status_poll_hz（默认 2Hz）发布 aos/ai_guide/ 状态话题。
+ *   - 订阅 /uav_guide/intercept_mode、读取 /uav_guide/tracking_mode；
+ *     订阅 /uav/state、/target/state、/uav/planned_path 上报状态与路径。
+ *   - 以 status_poll_hz（默认 2Hz）发布 aoa/ai_guide/ 状态话题（JSON）。
  */
 
 #include <ros/ros.h>
 #include <std_msgs/String.h>
+#include <nav_msgs/Odometry.h>
+#include <uav_guide/UavPlannedPath.h>
 
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
@@ -177,8 +181,8 @@ struct Config {
     std::string mode_cmd_topic;
     std::string nav_status_topic;
     std::string guide_status_topic;
-    std::string mode_status_topic;
-    std::string tracking_status_topic;
+    std::string agg_status_topic;
+    std::string planedpath_topic;
 
     std::string setup_shell;
     std::string launch_pkg;
@@ -205,9 +209,9 @@ Config loadConfig(ros::NodeHandle& nh)
     nh.param("mqtt/mode_cmd_topic", c.mode_cmd_topic, std::string("aoa/ai_guide/guide/mode_cmd"));
     nh.param("mqtt/nav_status_topic", c.nav_status_topic, std::string("aoa/ai_guide/nav/status"));
     nh.param("mqtt/guide_status_topic", c.guide_status_topic, std::string("aoa/ai_guide/guide/status"));
-    nh.param("mqtt/mode_status_topic", c.mode_status_topic, std::string("aoa/ai_guide/guide/mode"));
-    nh.param("mqtt/tracking_status_topic", c.tracking_status_topic,
-             std::string("aoa/ai_guide/guide/tracking"));
+    nh.param("mqtt/agg_status_topic", c.agg_status_topic, std::string("aoa/ai_guide/status"));
+    nh.param("mqtt/planedpath_topic", c.planedpath_topic,
+             std::string("aoa/ai_guide/guide/planedpath"));
 
     nh.param("mssn/setup_shell", c.setup_shell,
              std::string("source /opt/ros/noetic/setup.bash\n"
@@ -242,6 +246,11 @@ public:
         mode_sub_ = nh_.subscribe("/uav_guide/intercept_mode", 1,
                                   &MssnBridge::onInterceptMode, this);
         mode_cmd_pub_ = nh_.advertise<std_msgs::String>("/uav_guide/intercept_mode_cmd", 1);
+
+        // ROS 侧：订阅本机/目标位姿与规划路径，用于状态与路径上报
+        uav_sub_ = nh_.subscribe("/uav/state", 1, &MssnBridge::onUavState, this);
+        target_sub_ = nh_.subscribe("/target/state", 1, &MssnBridge::onTargetState, this);
+        planned_sub_ = nh_.subscribe("/uav/planned_path", 1, &MssnBridge::onPlannedPath, this);
 
         // 命令队列 / 状态轮询线程
         worker_ = std::thread(&MssnBridge::workerLoop, this);
@@ -431,20 +440,34 @@ private:
     {
         bool nav = false, guide = false, tracking = false;
         std::string mode;
+        ros_mqtt_bridge::UavStateJson uav, tgt;
+        std::vector<std::array<double, 6>> path;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             nav = pgrep(cfg_.launch_match);
             guide = pgrep(cfg_.waypoint_match);
             mode = intercept_mode_;
+            uav = uav_state_;
+            tgt = target_state_;
+            path = planned_path_;
         }
         ros::param::get("/uav_guide/tracking_mode", tracking);
 
         if (!mqtt_) return;
+        // aoa/ai_guide/nav/status：导航服务运行态
         mqtt_->publish(cfg_.nav_status_topic, ros_mqtt_bridge::encodeStateBool("running", nav));
-        mqtt_->publish(cfg_.guide_status_topic, ros_mqtt_bridge::encodeStateBool("running", guide));
-        mqtt_->publish(cfg_.mode_status_topic,
-                       ros_mqtt_bridge::encodeStateString("mode", mode.empty() ? "unknown" : mode));
-        mqtt_->publish(cfg_.tracking_status_topic, ros_mqtt_bridge::encodeStateBool("tracking", tracking));
+        // aoa/ai_guide/guide/status：引导运行态 + 本机/目标位姿
+        mqtt_->publish(cfg_.guide_status_topic,
+                       "{\"running\":" + std::string(guide ? "true" : "false") + ","
+                       + ros_mqtt_bridge::encodeUavStateField("uav_state", uav) + ","
+                       + ros_mqtt_bridge::encodeUavStateField("target_state", tgt) + "}");
+        // aoa/ai_guide/status：拦截模式 + TRACKING 状态（聚合）
+        mqtt_->publish(cfg_.agg_status_topic,
+                       "{\"mode\":\"" + (mode.empty() ? std::string("unknown") : mode)
+                       + "\",\"tracking\":" + std::string(tracking ? "true" : "false") + "}");
+        // aoa/ai_guide/guide/planedpath：6 维规划路径列表
+        mqtt_->publish(cfg_.planedpath_topic,
+                       "{" + ros_mqtt_bridge::encodePlannedPathField("planedPath", path) + "}");
     }
 
     void pollerLoop()
@@ -463,6 +486,44 @@ private:
         intercept_mode_ = msg->data;
     }
 
+    void onUavState(const nav_msgs::Odometry::ConstPtr& msg)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uav_state_ = toUavStateJson(*msg);
+    }
+
+    void onTargetState(const nav_msgs::Odometry::ConstPtr& msg)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target_state_ = toUavStateJson(*msg);
+    }
+
+    void onPlannedPath(const uav_guide::UavPlannedPath::ConstPtr& msg)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        planned_path_.clear();
+        planned_path_.reserve(msg->path.size());
+        for (const auto& p : msg->path) {
+            planned_path_.push_back({p.x, p.y, p.z, p.yaw, p.pitch, p.curvature});
+        }
+    }
+
+    static ros_mqtt_bridge::UavStateJson toUavStateJson(const nav_msgs::Odometry& odom)
+    {
+        ros_mqtt_bridge::UavStateJson s;
+        s.px = odom.pose.pose.position.x;
+        s.py = odom.pose.pose.position.y;
+        s.pz = odom.pose.pose.position.z;
+        s.ox = odom.pose.pose.orientation.x;
+        s.oy = odom.pose.pose.orientation.y;
+        s.oz = odom.pose.pose.orientation.z;
+        s.ow = odom.pose.pose.orientation.w;
+        s.vx = odom.twist.twist.linear.x;
+        s.vy = odom.twist.twist.linear.y;
+        s.vz = odom.twist.twist.linear.z;
+        return s;
+    }
+
     // ---- 成员 ----
 
     ros::NodeHandle& nh_;
@@ -470,11 +531,17 @@ private:
     ros_mqtt_bridge::MqttClient* mqtt_ = nullptr;
     ros::Subscriber mode_sub_;
     ros::Publisher mode_cmd_pub_;
+    ros::Subscriber uav_sub_;
+    ros::Subscriber target_sub_;
+    ros::Subscriber planned_sub_;
 
     std::mutex mutex_;
     pid_t nav_pid_ = -1;
     pid_t waypoint_pid_ = -1;
     std::string intercept_mode_ = "unknown";
+    ros_mqtt_bridge::UavStateJson uav_state_;
+    ros_mqtt_bridge::UavStateJson target_state_;
+    std::vector<std::array<double, 6>> planned_path_;
 
     std::mutex q_mutex_;
     std::queue<CmdMsg> q_;

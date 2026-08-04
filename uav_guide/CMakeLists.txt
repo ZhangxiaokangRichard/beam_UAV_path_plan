@@ -31,10 +31,6 @@ catkin_package(
 catkin_install_python(PROGRAMS
   scripts/uav_guide_loop_node.py
   scripts/uav_guide_point_node.py
-  scripts/uav_guide_mock_state.py
-  scripts/uav_guide_viz.py
-  scripts/uav_guide_dump_all_points.py
-  scripts/uav_guide_route_viz.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

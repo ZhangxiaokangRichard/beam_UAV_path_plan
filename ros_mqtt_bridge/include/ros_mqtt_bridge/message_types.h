@@ -48,4 +48,11 @@ struct Waypoint {
     double speed_mps = 0.0;
 };
 
+/// 用于 MQTT 状态上报的 UAV 位姿快照（取自 nav_msgs/Odometry）。
+struct UavStateJson {
+    double px = 0.0, py = 0.0, pz = 0.0;            // pose.pose.position
+    double ox = 0.0, oy = 0.0, oz = 0.0, ow = 1.0;  // pose.pose.orientation (四元数)
+    double vx = 0.0, vy = 0.0, vz = 0.0;            // twist.twist.linear
+};
+
 }  // namespace ros_mqtt_bridge
