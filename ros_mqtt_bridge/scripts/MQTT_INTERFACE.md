@@ -143,7 +143,7 @@ flowchart LR
 
 **用途**：远程启动/停止导航服务（等效执行 `roslaunch uav_guide uav_guide.launch`）。
 
-> 启动时会在桌面**新建 xterm 终端**运行 launch，可实时查看 ROS 输出；停止时自动关闭该终端。无图形会话（`DISPLAY` 未设置）时回退为后台日志（`~/.ros/mqtt_mssn_bridge/logs/`）。
+> 启动方式：有图形会话（`DISPLAY` 已设置）时在桌面**新建 xterm 终端**运行 launch；**无窗口环境**用 **tmux 会话**启动（`tmux attach -t uav_guide_launch` 查看输出，或 `tmux capture-pane -t uav_guide_launch -p` 抓屏）；tmux 不可用时回退后台日志。停止时自动关闭对应终端/会话。
 
 ```json
 { "start": true }   // 启动
@@ -159,7 +159,7 @@ flowchart LR
 
 **用途**：远程启动/停止引导动作（等效执行 `rosrun ros_mqtt_bridge mqtt_waypoint_bridge`）。
 
-> 启动时会在桌面**新建 xterm 终端**运行 `mqtt_waypoint_bridge`；停止时自动关闭该终端。无图形会话时回退为后台日志。
+> 启动方式同 3.4：有图形会话用 **xterm** 终端；无窗口环境用 **tmux 会话**（`tmux attach -t mqtt_waypoint_bridge`）；tmux 不可用时回退后台日志。停止时自动关闭对应终端/会话。
 
 ```json
 { "start": true }   // 启动

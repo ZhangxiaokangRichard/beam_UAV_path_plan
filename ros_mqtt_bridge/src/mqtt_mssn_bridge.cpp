@@ -4,7 +4,7 @@
  *
  * 融合原 guide_mqtt_bridge（Python）能力到 ros_mqtt_bridge：
  *   - 订阅 aoa/ai_guide/ 命令话题，管理 uav_guide.launch 与 mqtt_waypoint_bridge
- *     进程的启停（xterm 弹窗运行，无图形会话时后台日志）。
+ *     进程的启停（有 DISPLAY 时 xterm 弹窗，无窗口环境用 tmux 会话）。
  *   - 通过 ROS Publisher 直接切换拦截模式（等效 rostopic pub -1）。
  *   - 订阅 /uav_guide/intercept_mode、读取 /uav_guide/tracking_mode；
  *     订阅 /uav/state、/target/state、/uav/planned_path 上报状态与路径。
@@ -119,11 +119,61 @@ pid_t runDetached(const std::string& shell_cmd, const std::string& log_file)
     return pid;
 }
 
-/// 打开 xterm 终端运行命令（用户可实时观察 launch / rosrun 输出）。
-/// 无 DISPLAY（无图形会话）时回退为后台日志方式。返回进程 PID。
-pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
-                       const std::string& log_file)
+// ---------------------------------------------------------------------------
+// tmux（无头环境的多进程启动 / 查看 / 停止）
+// ---------------------------------------------------------------------------
+
+/// tmux 是否可用（未安装时回退为后台日志方式）。
+bool tmuxAvailable()
 {
+    const int rc = std::system("command -v tmux >/dev/null 2>&1");
+    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+}
+
+/// 将多行命令折叠为单行（供 bash -c 在 tmux 内使用）。
+std::string collapseToLine(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) out += (c == '\n') ? ';' : c;
+    return out;
+}
+
+/// tmux 会话名不允许 '.' 与 ':'，统一替换为 '_'。
+std::string sanitizeSessionName(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) out += (c == '.' || c == ':') ? '_' : c;
+    return out;
+}
+
+/// 停止 tmux 会话（整棵进程树一并结束）。
+void tmuxKillSession(const std::string& session)
+{
+    const std::string cmd = "tmux kill-session -t '" + session + "' >/dev/null 2>&1 || true";
+    std::system(cmd.c_str());
+}
+
+/// 新建分离的 tmux 会话运行命令；可 tmux attach -t <session> 查看输出。
+void tmuxNewSession(const std::string& session, const std::string& shell_cmd)
+{
+    tmuxKillSession(session);  // 清理可能残留的同名会话，避免 duplicate session
+    const std::string line = collapseToLine(shell_cmd);
+    const std::string cmd = "tmux new-session -d -s '" + session + "' \"bash -lc '" +
+                            line + "'\" >/dev/null 2>&1";
+    std::system(cmd.c_str());
+}
+
+/// 打开终端运行命令（用户可实时观察 launch / rosrun 输出）。
+/// 有 DISPLAY 时用 xterm；无 DISPLAY（无窗口）时用 tmux 会话（可 attach 查看）；
+/// tmux 不可用时回退为后台日志方式。
+/// @param session_out 输出 tmux 会话名（仅 tmux 路径），否则置空。
+/// @return >0 = 进程 PID（xterm / 后台日志）；0 = 已通过 tmux 会话启动（无 PID 可跟踪）。
+pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
+                       const std::string& log_file, std::string& session_out)
+{
+    session_out.clear();
     const char* display = std::getenv("DISPLAY");
     if (display && display[0] != '\0') {
         const pid_t pid = fork();
@@ -138,7 +188,15 @@ pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
         }
         return pid;
     }
-    ROS_WARN("[mqtt_mssn_bridge] DISPLAY 未设置，回退为后台日志方式启动 %s",
+    // 无窗口环境：优先 tmux 会话（分离、可 attach / capture-pane 查看输出）
+    if (tmuxAvailable()) {
+        session_out = sanitizeSessionName(title);
+        tmuxNewSession(session_out, shell_cmd);
+        ROS_INFO("[mqtt_mssn_bridge] 无 DISPLAY，以 tmux 会话 '%s' 启动"
+                 "（查看: tmux attach -t %s）", session_out.c_str(), session_out.c_str());
+        return 0;
+    }
+    ROS_WARN("[mqtt_mssn_bridge] 无 DISPLAY 且无 tmux，回退为后台日志方式启动 %s",
              title.c_str());
     return runDetached(shell_cmd, log_file);
 }
@@ -371,9 +429,9 @@ private:
             cfg_.setup_shell,
             "exec roslaunch " + cfg_.launch_pkg + " " + cfg_.launch_file);
         const std::string log = cfg_.log_dir + "/uav_guide_launch.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting roslaunch %s %s (new xterm)",
+        ROS_INFO("[mqtt_mssn_bridge] starting roslaunch %s %s (xterm/tmux)",
                  cfg_.launch_pkg.c_str(), cfg_.launch_file.c_str());
-        nav_pid_ = launchInTerminal("uav_guide.launch", cmd, log);
+        nav_pid_ = launchInTerminal("uav_guide.launch", cmd, log, nav_session_);
         for (int i = 0; i < cfg_.launch_timeout_s * 2; ++i) {
             if (pgrep(cfg_.launch_match)) {
                 ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch started");
@@ -396,8 +454,8 @@ private:
             cfg_.setup_shell,
             "exec rosrun ros_mqtt_bridge mqtt_waypoint_bridge");
         const std::string log = cfg_.log_dir + "/mqtt_waypoint_bridge.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting mqtt_waypoint_bridge (new xterm)");
-        waypoint_pid_ = launchInTerminal("mqtt_waypoint_bridge", cmd, log);
+        ROS_INFO("[mqtt_mssn_bridge] starting mqtt_waypoint_bridge (xterm/tmux)");
+        waypoint_pid_ = launchInTerminal("mqtt_waypoint_bridge", cmd, log, waypoint_session_);
         for (int i = 0; i < cfg_.waypoint_timeout_s * 2; ++i) {
             if (pgrep(cfg_.waypoint_match)) {
                 ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge started");
@@ -412,7 +470,12 @@ private:
     void stopWaypoint()
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        stopProcessGroup(waypoint_pid_);
+        if (!waypoint_session_.empty()) {
+            tmuxKillSession(waypoint_session_);
+            waypoint_session_.clear();
+        } else {
+            stopProcessGroup(waypoint_pid_);
+        }
         pkillMatch(cfg_.waypoint_match);
         waypoint_pid_ = -1;
         ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge stopped");
@@ -422,11 +485,21 @@ private:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         // 引导动作依赖导航，先停引导
-        stopProcessGroup(waypoint_pid_);
+        if (!waypoint_session_.empty()) {
+            tmuxKillSession(waypoint_session_);
+            waypoint_session_.clear();
+        } else {
+            stopProcessGroup(waypoint_pid_);
+        }
         pkillMatch(cfg_.waypoint_match);
         waypoint_pid_ = -1;
 
-        stopProcessGroup(nav_pid_);
+        if (!nav_session_.empty()) {
+            tmuxKillSession(nav_session_);
+            nav_session_.clear();
+        } else {
+            stopProcessGroup(nav_pid_);
+        }
         pkillMatch(cfg_.launch_match);
         nav_pid_ = -1;
         ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch stopped");
@@ -534,6 +607,8 @@ private:
     std::mutex mutex_;
     pid_t nav_pid_ = -1;
     pid_t waypoint_pid_ = -1;
+    std::string nav_session_;      // 无头 tmux 会话名（空 = 非 tmux 路径）
+    std::string waypoint_session_;
     std::string intercept_mode_ = "unknown";
     ros_mqtt_bridge::UavStateJson uav_state_;
     ros_mqtt_bridge::UavStateJson target_state_;
