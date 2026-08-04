@@ -1,38 +1,41 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# 开机自启：启动 roscore + mqtt_mssn_bridge（xterm 终端显示日志）
+# 启动 roscore + mqtt_mssn_bridge（tmux 会话，适合无窗口环境）
 #
-# 用法：
-#   1) 依赖 xterm：  sudo apt install -y xterm
-#   2) 赋予执行权限： chmod +x start_mqtt_mssn_bridge.sh
-#   3) 手动运行：     ./start_mqtt_mssn_bridge.sh
-#      开机自启：在「启动应用程序」中添加本脚本，或用 systemd 服务。
+#   tmux attach -t roscore            查看 roscore
+#   tmux attach -t mqtt_mssn_bridge   查看 mqtt_mssn_bridge
+#   tmux kill-session -t <name>       手动停止某会话
 # ═══════════════════════════════════════════════════════════════
+set -eo pipefail
 
-set -euo pipefail
-
+# ── ROS 环境 ──
 export ROS_DISTRO=noetic
+export ROS_MASTER_URI=http://localhost:11311
+export ROS_HOSTNAME=localhost
+export ROS_PYTHON_VERSION=3
+
 source /opt/ros/noetic/setup.bash
-source "$HOME/catkin_ws/devel/setup.bash"
+source /home/aos-dev/catkin_ws/devel/setup.bash
 
-command -v xterm >/dev/null 2>&1 || {
-    echo "[start] xterm not found, run: sudo apt install -y xterm"
-    exit 1
-}
+command -v tmux >/dev/null 2>&1 || { echo "[start] tmux not installed"; exit 1; }
 
-# 1) roscore（若未运行则启动）
+# 清理可能残留的同名 tmux 会话
+tmux kill-session -t roscore 2>/dev/null || true
+tmux kill-session -t mqtt_mssn_bridge 2>/dev/null || true
+
+# 1) roscore（tmux 会话）
+echo "[start] starting roscore in tmux session 'roscore' ..."
+tmux new-session -d -s roscore "source /opt/ros/noetic/setup.bash; roscore"
+sleep 5
 if ! pgrep -f "rosmaster" >/dev/null 2>&1; then
-    echo "[start] starting roscore in xterm ..."
-    xterm -T roscore -geometry 110x28 -e \
-        "source /opt/ros/noetic/setup.bash; roscore" &
-    sleep 4
-else
-    echo "[start] roscore already running"
+    echo "[FATAL] roscore failed to start"
+    exit 1
 fi
+echo "[start] roscore OK"
 
-# 2) mqtt_mssn_bridge（xterm 终端，可查看节点日志；respawn 保证自动拉起）
-echo "[start] launching mqtt_mssn_bridge in xterm ..."
-xterm -T mqtt_mssn_bridge -geometry 140x36 -e \
-    "source /opt/ros/noetic/setup.bash; source $HOME/catkin_ws/devel/setup.bash; exec roslaunch ros_mqtt_bridge mqtt_mssn_bridge.launch" &
+# 2) mqtt_mssn_bridge（tmux 会话）
+echo "[start] launching mqtt_mssn_bridge in tmux session 'mqtt_mssn_bridge' ..."
+tmux new-session -d -s mqtt_mssn_bridge \
+    "source /opt/ros/noetic/setup.bash; source /home/aos-dev/catkin_ws/devel/setup.bash; roslaunch ros_mqtt_bridge mqtt_mssn_bridge.launch"
 
-echo "[start] done."
+echo "[start] done. tmux sessions: roscore, mqtt_mssn_bridge"

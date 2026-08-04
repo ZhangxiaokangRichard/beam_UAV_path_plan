@@ -1,0 +1,32 @@
+# beam_dubins 自动启动服务（tmux 方式，无头环境）
+# 安装到 /etc/systemd/system/beam_dubins_autostart.service 后：
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now beam_dubins_autostart
+#   sudo systemctl status beam_dubins_autostart
+# 查看 tmux 输出：tmux attach -t roscore / -t mqtt_mssn_bridge
+
+[Unit]
+Description=beam_dubins_mqtt_service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit：脚本内用 tmux 分离会话启动常驻进程，脚本退出后服务保持 active
+Type=oneshot
+RemainAfterExit=yes
+User=aos-dev
+Environment="HOME=/home/aos-dev"
+Environment="USER=aos-dev"
+Environment="ROS_DISTRO=noetic"
+Environment="ROS_MASTER_URI=http://localhost:11311"
+Environment="ROS_HOSTNAME=localhost"
+Environment="ROS_PYTHON_VERSION=3"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/opt/ros/noetic/bin"
+WorkingDirectory=/home/aos-dev/catkin_ws
+ExecStart=/home/aos-dev/catkin_ws/src/aos-ljd-beam-pathplan/ros_mqtt_bridge/scripts/start_mqtt_mssn_bridge.sh
+ExecStop=/home/aos-dev/catkin_ws/src/aos-ljd-beam-pathplan/ros_mqtt_bridge/scripts/stop_mqtt_mssn_bridge.sh
+TimeoutStartSec=60
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
