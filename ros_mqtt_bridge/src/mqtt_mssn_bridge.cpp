@@ -181,7 +181,6 @@ struct Config {
     std::string mode_cmd_topic;
     std::string nav_status_topic;
     std::string guide_status_topic;
-    std::string agg_status_topic;
     std::string planedpath_topic;
 
     std::string setup_shell;
@@ -209,7 +208,6 @@ Config loadConfig(ros::NodeHandle& nh)
     nh.param("mqtt/mode_cmd_topic", c.mode_cmd_topic, std::string("aoa/ai_guide/guide/mode_cmd"));
     nh.param("mqtt/nav_status_topic", c.nav_status_topic, std::string("aoa/ai_guide/nav/status"));
     nh.param("mqtt/guide_status_topic", c.guide_status_topic, std::string("aoa/ai_guide/guide/status"));
-    nh.param("mqtt/agg_status_topic", c.agg_status_topic, std::string("aoa/ai_guide/status"));
     nh.param("mqtt/planedpath_topic", c.planedpath_topic,
              std::string("aoa/ai_guide/guide/planedpath"));
 
@@ -456,15 +454,13 @@ private:
         if (!mqtt_) return;
         // aoa/ai_guide/nav/status：导航服务运行态
         mqtt_->publish(cfg_.nav_status_topic, ros_mqtt_bridge::encodeStateBool("running", nav));
-        // aoa/ai_guide/guide/status：引导运行态 + 本机/目标位姿
+        // aoa/ai_guide/guide/status：引导运行态 + 模式 + TRACKING + 本机/目标位姿
         mqtt_->publish(cfg_.guide_status_topic,
-                       "{\"running\":" + std::string(guide ? "true" : "false") + ","
+                       "{\"running\":" + std::string(guide ? "true" : "false")
+                       + ",\"mode\":\"" + (mode.empty() ? std::string("unknown") : mode)
+                       + "\",\"tracking\":" + std::string(tracking ? "true" : "false") + ","
                        + ros_mqtt_bridge::encodeUavStateField("uav_state", uav) + ","
                        + ros_mqtt_bridge::encodeUavStateField("target_state", tgt) + "}");
-        // aoa/ai_guide/status：拦截模式 + TRACKING 状态（聚合）
-        mqtt_->publish(cfg_.agg_status_topic,
-                       "{\"mode\":\"" + (mode.empty() ? std::string("unknown") : mode)
-                       + "\",\"tracking\":" + std::string(tracking ? "true" : "false") + "}");
         // aoa/ai_guide/guide/planedpath：6 维规划路径列表
         mqtt_->publish(cfg_.planedpath_topic,
                        "{" + ros_mqtt_bridge::encodePlannedPathField("planedPath", path) + "}");

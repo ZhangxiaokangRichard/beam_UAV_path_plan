@@ -59,9 +59,8 @@ flowchart LR
 |---|---|---|---|---|
 | 1 | `aoa/uav_control/${uav_sn}/event_services` | JSON（`method=fly_point`） | `mqtt_waypoint_bridge` | `/uav/guide_point` 时间戳更新时 |
 | 2 | `aoa/ai_guide/nav/status` | JSON（`{"running": bool}`） | `mqtt_mssn_bridge` | 2 Hz |
-| 3 | `aoa/ai_guide/guide/status` | JSON（`{"running", "uav_state", "target_state"}`） | `mqtt_mssn_bridge` | 2 Hz |
-| 4 | `aoa/ai_guide/status` | JSON（`{"mode", "tracking"}`，聚合） | `mqtt_mssn_bridge` | 2 Hz |
-| 5 | `aoa/ai_guide/guide/planedpath` | JSON（`{"planedPath": [[6 维路径点]...]}`） | `mqtt_mssn_bridge` | 2 Hz |
+| 3 | `aoa/ai_guide/guide/status` | JSON（`{"running","mode","tracking","uav_state","target_state"}`） | `mqtt_mssn_bridge` | 2 Hz |
+| 4 | `aoa/ai_guide/guide/planedpath` | JSON（`{"planedPath": [[6 维路径点]...]}`） | `mqtt_mssn_bridge` | 2 Hz |
 
 > `${uav_sn}`：UAV 序列号，由 `mqtt_target_bridge` 写入 `/uav/state` 的 `child_frame_id`，`mqtt_waypoint_bridge` 读取后拼入主题。
 
@@ -217,13 +216,15 @@ flowchart LR
 
 JSON：`{"running": true}` = `uav_guide.launch` 运行中，`{"running": false}` = 未运行。
 
-### 4.3 `aoa/ai_guide/guide/status` — 引导状态 + 本机/目标位姿
+### 4.3 `aoa/ai_guide/guide/status` — 引导状态 + 模式 + 位姿
 
-JSON（含引导运行态与当前 UAV/目标位姿快照，来自 ROS `/uav/state`、`/target/state` 的 `position` / `orientation`(四元数) / `twist.twist.linear`）：
+JSON（含引导运行态、拦截模式、TRACKING 状态，以及本机/目标位姿快照；位姿来自 ROS `/uav/state`、`/target/state` 的 `position` / `orientation`(四元数) / `twist.twist.linear`）：
 
 ```json
 {
   "running": true,
+  "mode": "head-on",
+  "tracking": false,
   "uav_state": {
     "position":    { "x": 1.0, "y": 2.0, "z": 3.0 },
     "orientation": { "x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0 },
@@ -233,20 +234,14 @@ JSON（含引导运行态与当前 UAV/目标位姿快照，来自 ROS `/uav/sta
 }
 ```
 
-> `uav_state` / `target_state` 在未收到对应 ROS 话题时输出默认 0 / w=1。
-
-### 4.4 `aoa/ai_guide/status` — 聚合状态（模式 + TRACKING）
-
-JSON：合并原 `guide/mode` 与 `guide/tracking` 两个话题：
-
-```json
-{ "mode": "head-on", "tracking": false }
-```
-
+- `running`：`mqtt_waypoint_bridge` 是否运行
 - `mode`：`head-on` | `tail` | `unknown`（未收到 `/uav_guide/intercept_mode` 时）
 - `tracking`：bool，是否进入 TRACKING（读 `/uav_guide/tracking_mode`）
+- `uav_state` / `target_state`：未收到对应 ROS 话题时输出默认 0 / w=1
 
-### 4.5 `aoa/ai_guide/guide/planedpath` — 规划路径（6 维）
+> 原独立的 `guide/mode`、`guide/tracking`、`ai_guide/status` 话题已并入本话题。
+
+### 4.4 `aoa/ai_guide/guide/planedpath` — 规划路径（6 维）
 
 JSON：来自 ROS `/uav/planned_path`（`uav_guide/UavPlannedPath`）的 `path` 数组，每个点编码为 **6 维**列表 `[x, y, z, yaw, pitch, curvature]`（对应 `beam_dubins/PathPoint` 的 6 个字段）：
 
@@ -274,8 +269,7 @@ JSON：来自 ROS `/uav/planned_path`（`uav_guide/UavPlannedPath`）的 `path` 
 | 命令 `nav/cmd`、`guide/cmd` | `{"start": <bool>}` | 布尔 |
 | 命令 `guide/mode_cmd` | `{"mode": "<head-on\|tail>"}` | 字符串 |
 | 状态 `nav/status` | `{"running": <bool>}` | 布尔 |
-| 状态 `guide/status` | `{"running", "uav_state", "target_state"}` | 布尔 + 对象 |
-| 状态 `ai_guide/status`（聚合） | `{"mode", "tracking"}` | 字符串 + 布尔 |
+| 状态 `guide/status` | `{"running","mode","tracking","uav_state","target_state"}` | 布尔 + 字符串 + 对象 |
 | 状态 `guide/planedpath` | `{"planedPath": [[x,y,z,yaw,pitch,curvature]...]}` | 6 维数值数组 |
 
 > 命令载荷解析失败（非 JSON / 缺字段）会告警并忽略该命令。
@@ -334,11 +328,10 @@ sequenceDiagram
     M->>B: aoa/ai_guide/nav/status = {"running": true}
     C->>B: aoa/ai_guide/guide/cmd = {"start": true}
     B->>M: 启动 mqtt_waypoint_bridge
-    M->>B: aoa/ai_guide/guide/status = {"running": true, "uav_state": {...}, "target_state": {...}}
-    M->>B: aoa/ai_guide/status = {"mode": "head-on", "tracking": false}
+    M->>B: aoa/ai_guide/guide/status = {"running": true, "mode": "head-on", "tracking": false, "uav_state": {...}, "target_state": {...}}
     C->>B: aoa/ai_guide/guide/mode_cmd = {"mode": "tail"}
     B->>M: rostopic 切换模式
-    M->>B: aoa/ai_guide/status = {"mode": "tail", "tracking": true}  (进入 TRACKING)
+    M->>B: aoa/ai_guide/guide/status = {"running": true, "mode": "tail", "tracking": true, ...}  (进入 TRACKING)
     Note over M,B: mqtt_waypoint_bridge 持续下发 fly_point
     M->>B: aoa/uav_control/${uav_sn}/event_services (fly_point JSON)
     M->>B: aoa/ai_guide/guide/planedpath (6 维路径列表)
@@ -363,7 +356,6 @@ sequenceDiagram
 | `mqtt.mode_cmd_topic` | `aoa/ai_guide/guide/mode_cmd` | 同上 |
 | `mqtt.nav_status_topic` | `aoa/ai_guide/nav/status` | 同上 |
 | `mqtt.guide_status_topic` | `aoa/ai_guide/guide/status` | 同上 |
-| `mqtt.agg_status_topic` | `aoa/ai_guide/status` | 同上 |
 | `mqtt.planedpath_topic` | `aoa/ai_guide/guide/planedpath` | 同上 |
 | `mssn.status_poll_hz` | `2.0` | 同上 |
 | `mssn.ensure_nav_on_mode` | `true` | 同上 |
@@ -378,7 +370,7 @@ sequenceDiagram
 | `decodeUavsInfo` | `uav_caster/uavs_information` | `data.uavs[].uav_sn` |
 | `decodeFstInfo` | `aoa/uav_center/fst_info` | `data.barrels[].uav_sn` |
 | `decodeStateBool` / `encodeStateBool` | `aoa/ai_guide/nav/cmd`、`guide/cmd`、`nav/status` | `{"start"\|"running": bool}` |
-| `decodeStateString` / `encodeStateString` | `aoa/ai_guide/guide/mode_cmd`、`ai_guide/status` | `{"mode": string}` |
+| `decodeStateString` / `encodeStateString` | `aoa/ai_guide/guide/mode_cmd`、`guide/status` | `{"mode": string}` |
 | `encodeUavStateField` | `aoa/ai_guide/guide/status` | `uav_state` / `target_state` 对象 |
 | `encodePlannedPathField` | `aoa/ai_guide/guide/planedpath` | `planedPath` 6 维数组 |
 | `decodeTargetState` | （保留，测试用） | `schema = "beam_dubins.target_state.v1"` |
@@ -395,4 +387,4 @@ sequenceDiagram
 | 日期 | 内容 |
 |---|---|
 | 2026-08-02 | 新增 `mqtt_mssn_bridge` 及 `aoa/ai_guide/*` 话题组（原 `guide_mqtt_bridge` 能力融合入包） |
-| 2026-08-03 | 新增 `uav_state` / `target_state` / `planedPath` 状态上报；`mode`+`tracking` 合并为 `aoa/ai_guide/status` 聚合话题；启动改为 xterm 弹窗 |
+| 2026-08-03 | 新增 `uav_state` / `target_state` / `planedPath` 状态上报；`mode`+`tracking` 并入 `guide/status`；启动改为 xterm 弹窗 |

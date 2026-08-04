@@ -15,8 +15,7 @@ mqtt:
 
   # ── 状态话题（节点发布，载荷为 JSON，默认 2Hz） ──
   nav_status_topic: aoa/ai_guide/nav/status          # {"running": true}  导航服务是否运行
-  guide_status_topic: aoa/ai_guide/guide/status      # {"running":...,"uav_state":{...},"target_state":{...}}
-  agg_status_topic: aoa/ai_guide/status              # {"mode": "head-on","tracking": true}  聚合状态
+  guide_status_topic: aoa/ai_guide/guide/status      # {"running":...,"mode":...,"tracking":...,"uav_state":{...},"target_state":{...}}
   planedpath_topic: aoa/ai_guide/guide/planedpath    # {"planedPath": [[x,y,z,yaw,pitch,curvature], ...]}
 
 mssn:
