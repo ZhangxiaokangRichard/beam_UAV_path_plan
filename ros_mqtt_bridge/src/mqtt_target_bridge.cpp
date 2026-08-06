@@ -25,8 +25,6 @@
 namespace {
 
 struct PendingMessage { std::string topic; std::string payload; };
-std::mutex g_mutex;
-std::queue<PendingMessage> g_queue;
 
 // ---- 单架 UAV 的追踪状态 ----
 struct UavTracker {
@@ -180,7 +178,9 @@ int main(int argc, char** argv)
     std::string host, prefix, uav_info_topic;
     std::string target_list_topic, target_filter;
     std::string own_list_topic,    own_filter;
+    std::string target_host, own_host;
     int port, qos, keepalive;
+    int target_port, own_port;
     double origin_lat, origin_lon, origin_alt, timeout_ms;
     bool publish_tf;
     nh.param<std::string>("/mqtt/host",          host,          "192.168.70.62");
@@ -199,6 +199,14 @@ int main(int argc, char** argv)
     nh.param<std::string>("/bridge/own_uav_topic",     own_list_topic,    "aoa/uav_center/fst_info");
     nh.param<std::string>("/bridge/own_uav_filter",    own_filter,        "NOCON");
 
+    // target / own 各自专属 MQTT broker（未设置时回退主 /mqtt/host、/mqtt/port）
+    target_host = host; own_host = host;
+    target_port = port; own_port = port;
+    nh.param<std::string>("/target/mqtt_host", target_host, host);
+    nh.param<int>        ("/target/mqtt_port", target_port, port);
+    nh.param<std::string>("/own/mqtt_host",    own_host,    host);
+    nh.param<int>        ("/own/mqtt_port",    own_port,    port);
+
     if (std::abs(origin_lat) < 1e-12 && std::abs(origin_lon) < 1e-12) {
         ROS_FATAL("[mqtt_ros_bridge] geodesy origin not configured");
         return 1;
@@ -210,7 +218,7 @@ int main(int argc, char** argv)
     // MQTT 1: target UAV 列表 (uav_caster/uavs_information)
     std::vector<std::string> target_uav_list;
     std::mutex target_list_mutex;
-    ros_mqtt_bridge::MqttClient mqtt_target_list("bridge_target_list", host, port, keepalive, qos,
+    ros_mqtt_bridge::MqttClient mqtt_target_list("bridge_target_list", target_host, target_port, keepalive, qos,
         [&](const std::string&, const std::string& payload) {
             std::vector<std::string> list;
             std::string err;
@@ -220,32 +228,48 @@ int main(int argc, char** argv)
             }
         });
 
-    // MQTT 2: own UAV 列表 (aoa/uav_center/fst_info)
+    // MQTT 2: own UAV 列表 (uav_caster/uavs_information，与 target 同一列表源，
+    //          用 decodeUavsInfo 解析 uavs[] 格式，按 filter 区分本机/目标)
     std::vector<std::string> own_uav_list;
     std::mutex own_list_mutex;
-    ros_mqtt_bridge::MqttClient mqtt_own_list("bridge_own_list", host, port, keepalive, qos,
+    ros_mqtt_bridge::MqttClient mqtt_own_list("bridge_own_list", own_host, own_port, keepalive, qos,
         [&](const std::string&, const std::string& payload) {
             std::vector<std::string> list;
             std::string err;
-            if (ros_mqtt_bridge::decodeFstInfo(payload, list, err)) {
+            if (ros_mqtt_bridge::decodeUavsInfo(payload, list, err)) {
                 std::lock_guard<std::mutex> lock(own_list_mutex);
                 own_uav_list = std::move(list);
             }
         });
 
-    // MQTT 3: uav_info 通配
-    ros_mqtt_bridge::MqttClient mqtt_uav("bridge_uav", host, port, keepalive, qos,
-        [](const std::string& topic, const std::string& payload) {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            g_queue.push({topic, payload});
+    // MQTT 3a: target 状态 uav_info（target broker 订阅通配）
+    std::mutex target_uav_mutex;
+    std::queue<PendingMessage> target_uav_queue;
+    ros_mqtt_bridge::MqttClient mqtt_target_uav("bridge_target_uav", target_host, target_port, keepalive, qos,
+        [&](const std::string& topic, const std::string& payload) {
+            std::lock_guard<std::mutex> lock(target_uav_mutex);
+            target_uav_queue.push({topic, payload});
+        });
+
+    // MQTT 3b: own 状态 uav_info（own broker 订阅通配）
+    std::mutex own_uav_mutex;
+    std::queue<PendingMessage> own_uav_queue;
+    ros_mqtt_bridge::MqttClient mqtt_own_uav("bridge_own_uav", own_host, own_port, keepalive, qos,
+        [&](const std::string& topic, const std::string& payload) {
+            std::lock_guard<std::mutex> lock(own_uav_mutex);
+            own_uav_queue.push({topic, payload});
         });
 
     if (!mqtt_target_list.start(target_list_topic))
         ROS_WARN("[mqtt_ros_bridge] target UAV list topic unavailable");
     if (!mqtt_own_list.start(own_list_topic))
         ROS_WARN("[mqtt_ros_bridge] own UAV list topic unavailable");
-    if (!mqtt_uav.start(uav_info_topic)) {
-        ROS_FATAL("[mqtt_ros_bridge] cannot subscribe uav_info");
+    if (!mqtt_target_uav.start(uav_info_topic)) {
+        ROS_FATAL("[mqtt_ros_bridge] cannot subscribe target uav_info");
+        return 1;
+    }
+    if (!mqtt_own_uav.start(uav_info_topic)) {
+        ROS_FATAL("[mqtt_ros_bridge] cannot subscribe own uav_info");
         return 1;
     }
 
@@ -304,28 +328,38 @@ int main(int argc, char** argv)
             }
         }
 
+        // target 状态：仅喂给 target_trk（target 独立 broker 的 uav_info）
         PendingMessage pending;
         bool has_msg = false;
         {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            if (!g_queue.empty()) { pending = g_queue.front(); g_queue.pop(); has_msg = true; }
+            std::lock_guard<std::mutex> lock(target_uav_mutex);
+            if (!target_uav_queue.empty()) { pending = target_uav_queue.front(); target_uav_queue.pop(); has_msg = true; }
         }
-
-        if (has_msg) {
+        if (has_msg && target_trk) {
             ros_mqtt_bridge::TargetState state;
             std::string error;
-            if (ros_mqtt_bridge::decodeUavInfo(pending.payload, state, error)) {
-                UavTracker* trk = nullptr;
-                if (target_trk && state.uav_sn == target_trk->uav_sn)
-                    trk = target_trk;
-                else if (own_trk && state.uav_sn == own_trk->uav_sn)
-                    trk = own_trk;
-                if (trk) {
-                    if (!(trk->has_state && state.mid == trk->last_mid &&
-                          state.timestamp == std::to_string(trk->last_ts))) {
-                        processUavInfo(*trk, state, geodesy, timeout_ms);
-                    }
-                }
+            if (ros_mqtt_bridge::decodeUavInfo(pending.payload, state, error) &&
+                state.uav_sn == target_trk->uav_sn &&
+                !(target_trk->has_state && state.mid == target_trk->last_mid &&
+                  state.timestamp == std::to_string(target_trk->last_ts))) {
+                processUavInfo(*target_trk, state, geodesy, timeout_ms);
+            }
+        }
+
+        // own 状态：仅喂给 own_trk（own 独立 broker 的 uav_info）
+        has_msg = false;
+        {
+            std::lock_guard<std::mutex> lock(own_uav_mutex);
+            if (!own_uav_queue.empty()) { pending = own_uav_queue.front(); own_uav_queue.pop(); has_msg = true; }
+        }
+        if (has_msg && own_trk) {
+            ros_mqtt_bridge::TargetState state;
+            std::string error;
+            if (ros_mqtt_bridge::decodeUavInfo(pending.payload, state, error) &&
+                state.uav_sn == own_trk->uav_sn &&
+                !(own_trk->has_state && state.mid == own_trk->last_mid &&
+                  state.timestamp == std::to_string(own_trk->last_ts))) {
+                processUavInfo(*own_trk, state, geodesy, timeout_ms);
             }
         }
 
