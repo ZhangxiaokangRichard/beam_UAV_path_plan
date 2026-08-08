@@ -10,8 +10,8 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_message_files(
   FILES
-  UavGuidePoint.msg
   UavPlannedPath.msg
+  UavCmd.msg
 )
 
 catkin_python_setup()
@@ -30,7 +30,6 @@ catkin_package(
 
 catkin_install_python(PROGRAMS
   scripts/uav_guide_loop_node.py
-  scripts/uav_guide_point_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

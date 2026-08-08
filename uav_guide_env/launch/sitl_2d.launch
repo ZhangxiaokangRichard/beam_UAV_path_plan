@@ -8,6 +8,7 @@
     <rosparam ns="space" param="boundary_margin">50.0</rosparam>
     <rosparam ns="simulation" param="dt">0.1</rosparam>
     <rosparam ns="simulation" param="plan_interval">2</rosparam>
-    <include file="$(find ros_mqtt_bridge)/launch/mqtt_bridge.launch"/>
-    <node name="sitl_loop" pkg="uav_guide_env" type="sitl_loop" output="screen"/>
+    <!-- 状态来源：UDP 桥（替代原 MQTT 桥；ros_mqtt_bridge 已清理） -->
+    <include file="$(find ros_udp_bridge)/launch/udp_bridge.launch"/>
+    <node name="simulation_loop" pkg="uav_guide_env" type="simulation_loop" output="screen"/>
 </launch>

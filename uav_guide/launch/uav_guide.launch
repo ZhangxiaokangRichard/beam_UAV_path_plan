@@ -6,14 +6,13 @@
   <include file="$(find beam_dubins)/launch/planner.launch"/>
   <rosparam file="$(find beam_dubins)/config/beam_dubins.yaml" command="load" ns="beam_dubins"/>
 
-  <!-- MQTT → /uav/state, /target/state -->
-  <include file="$(find ros_mqtt_bridge)/launch/mqtt_bridge.launch"/>
+  <!-- UDP 桥：提供 /uav/state, /target/state 及 UDP 收/发（替代原 MQTT 桥） -->
+  <include file="$(find ros_udp_bridge)/launch/udp_bridge.launch"/>
+
+  <!-- 运动解算服务 /uav_dynamic/solve -->
+  <include file="$(find uav_dynamic)/launch/uav_dynamic.launch"/>
 
   <node pkg="uav_guide" type="uav_guide_loop_node.py" name="uav_guide_loop" output="screen">
-    <rosparam file="$(find uav_guide)/config/uav_guide.yaml" command="load"/>
-  </node>
-
-  <node pkg="uav_guide" type="uav_guide_point_node.py" name="uav_guide_point" output="screen">
     <rosparam file="$(find uav_guide)/config/uav_guide.yaml" command="load"/>
   </node>
 </launch>

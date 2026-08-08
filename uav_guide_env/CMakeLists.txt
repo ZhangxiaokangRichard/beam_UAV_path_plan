@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
   tf
   beam_dubins          # 依赖 Phase 1-2a 的算法包
+  uav_dynamic          # 运动解算服务（阶段 7b 控制律驱动）
 )
 
 # 包配置
@@ -25,6 +26,7 @@ catkin_package(
     visualization_msgs
     tf
     beam_dubins
+    uav_dynamic
 )
 
 # 包含目录
@@ -60,6 +62,7 @@ target_link_libraries(simulation_loop
 )
 add_dependencies(simulation_loop
   beam_dubins_generate_messages_cpp
+  uav_dynamic_generate_messages_cpp
   ${catkin_EXPORTED_TARGETS}
 )
 

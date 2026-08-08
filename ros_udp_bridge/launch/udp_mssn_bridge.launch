@@ -1,0 +1,8 @@
+<launch>
+  <!-- udp_mssn_bridge：本地 UDP 11302 指令入口（启停 uav_guide.launch / 切换拦截模式） -->
+  <rosparam file="$(find ros_udp_bridge)/config/udp_mssn_bridge.yaml" command="load"/>
+
+  <!-- respawn：节点异常退出后自动拉起 -->
+  <node pkg="ros_udp_bridge" type="udp_mssn_bridge" name="udp_mssn_bridge"
+        output="screen" respawn="true"/>
+</launch>

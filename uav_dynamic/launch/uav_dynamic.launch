@@ -1,0 +1,5 @@
+<launch>
+  <!-- uav_dynamic 运动解算服务 -->
+  <rosparam file="$(find uav_dynamic)/config/uav_dynamic.yaml" command="load"/>
+  <node pkg="uav_dynamic" type="uav_dynamics_server" name="uav_dynamics_server" output="screen"/>
+</launch>

@@ -34,10 +34,10 @@ finalshot:
   offset_m: 50
   radius_m: 10.0
 
-segmentation:
-  curvature_eps: 0.0001
-  yaw_segment_eps: 0.03
-  default_turn_radius_m: 500.0
+# 对接 uav_dynamic 服务时使用的水平速度模值
+# （uav_dynamic 服务端 motion.speed_mps 为默认，此处可覆盖）
+dynamics:
+  speed_mps: 50.0
 
 space:
   lx: 10000.0
@@ -45,14 +45,11 @@ space:
   lz: 1000.0
   boundary_margin: 50.0
 
-guide_point:
-  topic: /uav/guide_point
-  publish_rate_hz: 5.0
-
 output:
   planned_path_topic: /uav/planned_path
+  dynamics_cmd_topic: /uav/cmd
 
-# launch 未加载 mqtt_bridge.yaml 时的后备原点（应与 ros_mqtt_bridge 一致）
+# 与 ros_udp_bridge geodesy 原点一致时的后备原点
 geodesy:
   origin_latitude_deg: 34.01396246
   origin_longitude_deg: 116.92349937

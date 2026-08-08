@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ros_udp_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    ROS UDP 桥接节点：从指定 IP:端口接收 UDP 位姿 JSON，按 key 过滤 uav/target，
+    初始化 uav 起始位置与朝向（本地坐标），发布 target/state（卡尔曼滤波）与 uav/state。
+    自包含实现（geodesy/滤波/编解码在包内），不依赖 ros_mqtt_bridge / uav_guide。
+    详细设计见 scripts/design_tool.md。
+  </description>
+
+  <maintainer email="ros-dev@example.com">ros-dev</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf</depend>
+
+  <export>
+  </export>
+</package>

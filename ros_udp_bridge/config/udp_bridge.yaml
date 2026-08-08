@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════
+# ros_udp_bridge 配置（v0.2 设计占位，详细见 scripts/design_tool.md）
+# ═══════════════════════════════════════════════════════════════
+
+udp:
+  local_host: 0.0.0.0         # 收：绑定所有接口（测试/部署通用；部署时可按需改为具体 IP）
+  local_port: 11301           # 收：本机接收端口
+  remote_host: 10.119.228.21  # 发：udp_sender 发送目标（config 配置，不硬编码）
+  remote_port: 9100           # 发：udp_sender 发送端口
+  recv_buf_size: 4096         # 单包最大字节
+  recv_timeout_ms: 100        # 收包超时（毫秒）
+
+bridge:
+  uav_key: "425201827841"       # 本机拦截弹 key（JSON.key 过滤；发射后按现场确认）。字符串，避免 XML-RPC int 溢出
+  target_key: "30064967681"     # 目标 key（JSON.key 过滤，默认 E1）。字符串
+  uav_name: IM-01             # 发送 red_interceptor 的 name
+
+init:
+  heading_deg: 0.0            # 初始发射朝向默认值（角度制）；报文 heading 有效时优先用报文，默认 0°=正北
+
+target:
+  publish_hz: 40.0            # target/state 发布频率（卡尔曼估计速度/姿态）
+  publish_tf: true
+  timeout_ms: 5000
+
+uav_state:
+  publish_hz: 20.0            # uav/state 发布频率（与 UDP 发送频率一致）
+
+init_pos:
+  publish_hz: 1.0             # uav/init_pos 发布频率（1Hz，首包后内容不变）
+  latch: true
+
+geodesy:
+  origin_latitude_deg: 30.337989   # 源坐标锚点（协议 §3）
+  origin_longitude_deg: 104.152629
+  origin_altitude_m: 493.0
+  altitude_reference: ellipsoid

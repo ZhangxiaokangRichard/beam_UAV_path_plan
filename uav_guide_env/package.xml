@@ -19,6 +19,7 @@
   <depend>visualization_msgs</depend>
   <depend>tf</depend>
   <depend>beam_dubins</depend>
+  <depend>uav_dynamic</depend>
 
   <export>
   </export>

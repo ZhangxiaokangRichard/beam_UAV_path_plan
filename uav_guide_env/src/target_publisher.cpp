@@ -43,6 +43,25 @@ static nav_msgs::Odometry makeOdometry(const std::array<double, 5>& state,
 }
 
 // ═══════════════════════════════════════════════════════════════
+// external 模式：订阅真实 /target/state（来自 ros_udp_bridge）
+// ═══════════════════════════════════════════════════════════════
+
+static std::array<double, 5> g_real_target = {0.0, 0.0, 0.0, 0.0, 0.0};
+static bool g_has_real = false;
+
+static void realTargetCallback(const nav_msgs::Odometry::ConstPtr& msg)
+{
+    g_real_target[0] = msg->pose.pose.position.x;
+    g_real_target[1] = msg->pose.pose.position.y;
+    g_real_target[2] = msg->pose.pose.position.z;
+    double qz = msg->pose.pose.orientation.z;
+    double qw = msg->pose.pose.orientation.w;
+    g_real_target[3] = 2.0 * std::atan2(qz, qw);
+    g_real_target[4] = 0.0;
+    g_has_real = true;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 主函数
 // ═══════════════════════════════════════════════════════════════
 
@@ -80,23 +99,58 @@ int main(int argc, char** argv)
         traj_params = {2000.0, 2500.0, 600.0, 500.0, 3.0};
     }
 
-    // ── 创建目标轨迹对象 ───────────────────────────────────
-    uav_guide_env::TargetTrajectory target(traj_type, init_pos, traj_params);
-
-    double L = (intercept_mode == "head-on") ? L_headon : L_tail;
-    ROS_INFO("[target_publisher] 轨迹类型=%s 拦截模式=%s L=%.0fm",
-             traj_type.c_str(), intercept_mode.c_str(), L);
-
-    // ── Publishers ──────────────────────────────────────────
-    ros::Publisher pub_state  = nh.advertise<nav_msgs::Odometry>("/target/state", 10);
-    ros::Publisher pub_vgoal  = nh.advertise<nav_msgs::Odometry>("/target/virtual_goal", 10);
-    ros::Publisher pub_mode   = nh.advertise<std_msgs::String>("/target/intercept_mode", 10, true);
-    ros::Publisher pub_traj   = nh.advertise<nav_msgs::Path>("/target/trajectory_pred", 10, true);
-
-    // latched 发布拦截模式
+    // ── 拦截模式（latched 发布）────────────────────────────
+    ros::Publisher pub_vgoal = nh.advertise<nav_msgs::Odometry>("/target/virtual_goal", 10);
+    ros::Publisher pub_mode  = nh.advertise<std_msgs::String>("/target/intercept_mode", 10, true);
     std_msgs::String mode_msg;
     mode_msg.data = intercept_mode;
     pub_mode.publish(mode_msg);
+
+    double L = (intercept_mode == "head-on") ? L_headon : L_tail;
+
+    // ── 真实 target 外部模式（阶段 7b）─────────────────────
+    // external=true：不生成合成轨迹，订阅真实 /target/state（ros_udp_bridge
+    // udp_receiver 发布），仅转发 /target/virtual_goal + /target/intercept_mode，
+    // 供 simulation_loop 在获得真实 target 数据的前提下做内部 rviz 仿真。
+    bool external_target = false;
+    ros::param::param<bool>("/target/external_target", external_target, false);
+    if (external_target) {
+        std::string ext_topic = "/target/state";
+        ros::param::param<std::string>("/target/external_topic", ext_topic, ext_topic);
+        ROS_INFO("[target_publisher] EXTERNAL 模式：订阅 %s → 转发 virtual_goal/intercept_mode",
+                 ext_topic.c_str());
+        std::array<double, 5> ext_state = {init_pos[0], init_pos[1], init_pos[2], 0.0, 0.0};
+        bool ext_has = false;
+        auto ext_cb = [&](const nav_msgs::Odometry::ConstPtr& msg) {
+            ext_state[0] = msg->pose.pose.position.x;
+            ext_state[1] = msg->pose.pose.position.y;
+            ext_state[2] = msg->pose.pose.position.z;
+            ext_state[3] = 2.0 * std::atan2(msg->pose.pose.orientation.z,
+                                            msg->pose.pose.orientation.w);
+            ext_state[4] = 0.0;
+            ext_has = true;
+        };
+        ros::Subscriber sub_ext = nh.subscribe<nav_msgs::Odometry>(ext_topic, 10, ext_cb);
+        ros::Rate ext_rate(10.0);
+        while (ros::ok()) {
+            if (ext_has) {
+                auto vg = uav_guide_env::TargetTrajectory::computeVirtualGoal(
+                    ext_state, intercept_mode, L);
+                pub_vgoal.publish(makeOdometry(vg, "map", "virtual_goal_link", ros::Time::now()));
+            }
+            ros::spinOnce();
+            ext_rate.sleep();
+        }
+        return 0;
+    }
+
+    // ── 合成轨迹模式（原逻辑）──────────────────────────────
+    uav_guide_env::TargetTrajectory target(traj_type, init_pos, traj_params);
+    ROS_INFO("[target_publisher] 轨迹类型=%s 拦截模式=%s L=%.0fm",
+             traj_type.c_str(), intercept_mode.c_str(), L);
+
+    ros::Publisher pub_state = nh.advertise<nav_msgs::Odometry>("/target/state", 10);
+    ros::Publisher pub_traj  = nh.advertise<nav_msgs::Path>("/target/trajectory_pred", 10, true);
 
     // ── 10Hz 主循环 ────────────────────────────────────────
     ros::Rate rate(10.0);

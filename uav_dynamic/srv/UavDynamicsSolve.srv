@@ -1,0 +1,12 @@
+# 请求
+beam_dubins/PathPoint[] path    # 全局离散路径（beam_dubins 规划输出，起点≈uav 当前位置）
+float64 uav_height              # uav 当前高度 (m)
+float64 target_height           # 目标高度 (m)
+float64 speed_mps               # 水平速度模值 (m/s)，默认 50
+---
+# 响应
+bool success
+float64 heading_rad             # 期望航向角（协调转弯律，ENU 弧度）
+float64 roll_rad                # 期望滚转角（协调转弯律）
+float64 pitch_rad               # 期望迎角（纵向 PI，限幅）
+float64 climb_mps               # 期望垂直速度（限幅）

@@ -4,7 +4,7 @@
   <version>0.1.0</version>
   <description>
     UAV path guidance: subscribe own/target state, plan via beam_dubins,
-    publish WGS84 guide points for ground-station / MQTT forwarding.
+    solve dynamics via uav_dynamic, publish planned path and dynamics cmd.
   </description>
 
   <maintainer email="user@example.com">user</maintainer>
@@ -22,6 +22,8 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>beam_dubins</exec_depend>
+  <exec_depend>uav_dynamic</exec_depend>
+  <exec_depend>ros_udp_bridge</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
 
   <export>

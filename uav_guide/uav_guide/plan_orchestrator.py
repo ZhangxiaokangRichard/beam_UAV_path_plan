@@ -11,8 +11,8 @@ import rospy
 from beam_dubins.srv import PlanPath, PlanPathRequest
 
 from uav_guide.field_extractor import wrap_angle
+from uav_guide.finalshot import compute_offset_goal_xy
 from uav_guide.geodesy import Geodesy
-from uav_guide.guide_point_builder import compute_offset_goal_xy
 from uav_guide.intercept_mode_manager import normalize_intercept_mode
 
 

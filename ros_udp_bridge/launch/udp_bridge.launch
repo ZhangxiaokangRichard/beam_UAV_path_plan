@@ -1,0 +1,7 @@
+<launch>
+  <!-- ros_udp_bridge：阶段 1-3 + 6（收包 / uav 初始化 / target 卡尔曼 / UDP 发送） -->
+  <rosparam file="$(find ros_udp_bridge)/config/udp_bridge.yaml" command="load"/>
+
+  <node pkg="ros_udp_bridge" type="udp_receiver" name="udp_receiver" output="screen"/>
+  <node pkg="ros_udp_bridge" type="udp_sender" name="udp_sender" output="screen"/>
+</launch>

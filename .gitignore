@@ -1,5 +1,6 @@
 /CMakeLists.txt
 /uav_guide/__pycache__/
 /uav_guide/uav_guide/__pycache__/
+/uav_guide/scripts/__pycache__/
 /guide_mqtt_bridge/__pycache__/
 /.vscode

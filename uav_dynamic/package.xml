@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>uav_dynamic</name>
+  <version>0.1.0</version>
+  <description>
+    UAV 运动学解算服务包：输入 beam_dubins 全局离散路径 + uav/target 高度，
+    输出水平（DWA + 协调转弯律：航向/滚转）与纵向（高度误差 PI：迎角/垂直速度）控制指令。
+    自包含，不依赖 ros_mqtt_bridge / uav_guide。详细设计见 ros_udp_bridge/scripts/design_tool.md §4.3。
+  </description>
+
+  <maintainer email="ros-dev@example.com">ros-dev</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>message_generation</depend>
+  <depend>message_runtime</depend>
+  <depend>beam_dubins</depend>
+
+  <export>
+  </export>
+</package>

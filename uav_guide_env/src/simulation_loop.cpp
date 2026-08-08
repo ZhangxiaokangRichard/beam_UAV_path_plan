@@ -19,12 +19,14 @@
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/TransformStamped.h>
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "beam_dubins/PlanPath.h"
+#include "uav_dynamic/UavDynamicsSolve.h"
 #include "uav_guide_env/uav_model.h"
 
 // ═══════════════════════════════════════════════════════════════
@@ -58,6 +60,12 @@ struct SimulationState {
     int    depth_reached  = 0;
     double planning_time_ms = 0.0;
     std::string plan_status;
+
+    // ── uav_dynamic 控制律指令（use_dynamics 模式）──────
+    double dyn_heading = 0.0;
+    double dyn_roll    = 0.0;
+    double dyn_pitch   = 0.0;
+    double dyn_climb   = 0.0;
 
     // ── 空间边界 ──
     double lx = 10000.0, ly = 5000.0, lz = 1000.0;
@@ -379,6 +387,8 @@ int main(int argc, char** argv)
     ros::param::param<int>   ("/simulation/plan_interval",       plan_int,  2);
     ros::param::param<int>   ("/simulation/beam_reset_interval", reset_int, 30);
     ros::param::param<int>   ("/simulation/max_sim_steps",       max_steps, 8000);
+    bool use_dynamics = false;   // true=由 uav_dynamic 控制律驱动（阶段 7）
+    ros::param::param<bool>("/simulation/use_dynamics", use_dynamics, false);
 
     std::vector<double> start_vec;
     ros::param::get("/scenario/start", start_vec);
@@ -435,6 +445,17 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // ── 控制律服务（use_dynamics=true 时驱动运动学）────────
+    ros::ServiceClient dyn_client;
+    if (use_dynamics) {
+        dyn_client = nh.serviceClient<uav_dynamic::UavDynamicsSolve>("/uav_dynamic/solve");
+        ROS_INFO("[simulation_loop] 等待 /uav_dynamic/solve ...");
+        if (!dyn_client.waitForExistence(ros::Duration(10.0))) {
+            ROS_ERROR("[simulation_loop] uav_dynamic 服务未就绪");
+            return 1;
+        }
+    }
+
     // ── Subscribers（绑定回调，缓存最新目标数据）───────────
     ros::Subscriber sub_target = nh.subscribe<nav_msgs::Odometry>("/target/state", 10, targetStateCallback);
     ros::Subscriber sub_vgoal  = nh.subscribe<nav_msgs::Odometry>("/target/virtual_goal", 10, virtualGoalCallback);
@@ -446,6 +467,9 @@ int main(int argc, char** argv)
     ros::Publisher pub_bd_path    = nh.advertise<nav_msgs::Path>("/beam_dubins/path", 10);
     ros::Publisher pub_bd_cost    = nh.advertise<std_msgs::Float64>("/beam_dubins/path_cost", 10);
     ros::Publisher pub_sim_status = nh.advertise<std_msgs::String>("/sim/status", 10);
+    ros::Publisher pub_cmd_roll   = nh.advertise<std_msgs::Float64>("/uav/cmd_roll", 10);
+    ros::Publisher pub_cmd_pitch  = nh.advertise<std_msgs::Float64>("/uav/cmd_pitch", 10);
+    ros::Publisher pub_cmd_climb  = nh.advertise<std_msgs::Float64>("/uav/cmd_climb", 10);
 
     tf::TransformBroadcaster tf_br;
 
@@ -514,22 +538,59 @@ int main(int argc, char** argv)
 
         // 6. UAV 推进（tracking 模式也沿规划路径飞行）
         double advance_dist = cruise_speed * sim_dt;
-        if (sim.path_generation != s_last_gen) {
-            s_last_gen = sim.path_generation;
-            double best_d = INFINITY;
-            int best_i = 0;
-            for (int i = 0; i < static_cast<int>(sim.best_path.size()); ++i) {
-                double dx = sim.best_path[i][0] - sim.uav_pose[0];
-                double dy = sim.best_path[i][1] - sim.uav_pose[1];
-                double d = std::sqrt(dx*dx + dy*dy);
-                if (d < best_d) { best_d = d; best_i = i; }
+        if (use_dynamics) {
+            // ── uav_dynamic 控制律：规划路径 → 解算 roll/pitch/climb → 运动学推进 ──
+            if (!sim.best_path.empty()) {
+                uav_dynamic::UavDynamicsSolve ds;
+                ds.request.path.resize(sim.best_path.size());
+                for (size_t i = 0; i < sim.best_path.size(); ++i) {
+                    ds.request.path[i].x = sim.best_path[i][0];
+                    ds.request.path[i].y = sim.best_path[i][1];
+                    ds.request.path[i].z = sim.best_path[i][2];
+                    ds.request.path[i].yaw = sim.best_path[i][3];
+                    ds.request.path[i].pitch = 0.0;
+                    ds.request.path[i].curvature = 0.0;
+                }
+                ds.request.uav_height    = sim.uav_pose[2];
+                ds.request.target_height = sim.goal_state[2];
+                ds.request.speed_mps     = cruise_speed;
+                if (dyn_client.call(ds) && ds.response.success) {
+                    sim.dyn_heading = ds.response.heading_rad;
+                    sim.dyn_roll    = ds.response.roll_rad;
+                    sim.dyn_pitch   = ds.response.pitch_rad;
+                    sim.dyn_climb   = ds.response.climb_mps;
+                }
             }
-            sim.path_ptr = best_i;
+            // 运动学推进：bank=roll；爬升角=asin(climb/V)（保证垂直速度 ≤ ±3 m/s）
+            double gamma = std::asin(std::clamp(sim.dyn_climb / cruise_speed, -1.0, 1.0));
+            sim.uav_pose = uav.step(sim.uav_pose, sim.dyn_roll, gamma, sim_dt);
+
+            // 发布 uav_dynamic 控制指令（调试）
+            std_msgs::Float64 cmd_r, cmd_p, cmd_c;
+            cmd_r.data = sim.dyn_roll;
+            cmd_p.data = sim.dyn_pitch;
+            cmd_c.data = sim.dyn_climb;
+            pub_cmd_roll.publish(cmd_r);
+            pub_cmd_pitch.publish(cmd_p);
+            pub_cmd_climb.publish(cmd_c);
+        } else {
+            if (sim.path_generation != s_last_gen) {
+                s_last_gen = sim.path_generation;
+                double best_d = INFINITY;
+                int best_i = 0;
+                for (int i = 0; i < static_cast<int>(sim.best_path.size()); ++i) {
+                    double dx = sim.best_path[i][0] - sim.uav_pose[0];
+                    double dy = sim.best_path[i][1] - sim.uav_pose[1];
+                    double d = std::sqrt(dx*dx + dy*dy);
+                    if (d < best_d) { best_d = d; best_i = i; }
+                }
+                sim.path_ptr = best_i;
+            }
+            uav.interpolateAlongPathWithYawLimit(sim.uav_pose, sim.best_path,
+                                                  sim.path_ptr, sim.path_generation,
+                                                  sim.goal_state, advance_dist,
+                                                  path_lookahead_n);
         }
-        uav.interpolateAlongPathWithYawLimit(sim.uav_pose, sim.best_path,
-                                              sim.path_ptr, sim.path_generation,
-                                              sim.goal_state, advance_dist,
-                                              path_lookahead_n);
 
         // 7. 发布 UAV 状态 + 航向连续性保护 + 航迹
         pub_uav_state.publish(makeOdometry(sim.uav_pose, cruise_speed, "map", "uav_base_link", now));
