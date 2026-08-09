@@ -66,4 +66,5 @@ tmux new-session -d -s udp_mssn_bridge \
     "source '$ROS_SETUP' && source '$WS_SETUP' && roslaunch ros_udp_bridge udp_mssn_bridge.launch"
 
 echo "[start] done. tmux sessions: roscore, udp_mssn_bridge"
-echo "[start] 指令入口: UDP 127.0.0.1:11302  (见 UDP_INTERFACE.md)"
+echo "[start] UDP 收包: 0.0.0.0:11301（udp_receiver，由 udp_mssn_bridge 内部 tmux 拉起 uav_bridge.launch 提供）"
+echo "[start] 注意: 11302 指令接收已随极简版移除；确保宿主机无其他进程占用 11301/11311"

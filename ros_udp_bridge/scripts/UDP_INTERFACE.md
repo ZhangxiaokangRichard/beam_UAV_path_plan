@@ -11,8 +11,8 @@
 |------|------|------|------|
 | 11301 | 收（bind 0.0.0.0） | 现场 UDP 位姿数据（red_interceptor / blue_uav / blue） | `udp_receiver` |
 | 9100 | 发（remote_host:9100） | 本机 red_interceptor 发送（含 targetKey） | `udp_sender` |
-| 11302 | 收（bind 0.0.0.0） | **服务入口指令**（启停 launch / 切换拦截模式） | `udp_mssn_bridge` |
-| 11303 | 发（可选） | 服务状态回传 JSON | `udp_mssn_bridge` |
+| 11302 | —（已移除） | 极简版不再收服务入口指令 | — |
+| 11303 | —（已移除） | 极简版不再状态回传 | — |
 
 ---
 
@@ -63,61 +63,17 @@
 
 ---
 
-## 3. 服务入口指令（udp_mssn_bridge，端口 11302）
+## 3. udp_mssn_bridge（极简版职责，无 11302 指令）
 
-> 该节点为整个服务的入口：接收本地 UDP 指令，执行进程管理 / 模式切换。
-> 指令与状态均为一包一 JSON。**指令 JSON 数值/布尔为 JSON 类型（非字符串）。**
+> 极简版已**移除** 11302 指令接收与 11303 状态回传。该节点职责仅为：
 
-### 3.1 指令格式
-
-```json
-{"type":"nav",  "start":true}          // 启动 uav_guide.launch（含 planner/udp_bridge/uav_dynamic/uav_guide_loop）
-{"type":"nav",  "start":false}         // 停止 uav_guide.launch
-{"type":"guide","start":true}          // 启动可配置辅助进程（默认未配置则忽略）
-{"type":"guide","start":false}         // 停止辅助进程
-{"type":"mode", "mode":"head-on"}      // 切换为迎头拦截
-{"type":"mode", "mode":"tail"}         // 切换为尾追拦截
-```
-
-### 3.2 指令示例（nc / 脚本）
-
-```bash
-# 启动导航服务
-echo '{"type":"nav","start":true}' | nc -u -w1 127.0.0.1 11302
-# 切换迎头模式（会先确保 launch 已启动，见 ensure_nav_on_mode）
-echo '{"type":"mode","mode":"head-on"}' | nc -u -w1 127.0.0.1 11302
-# 停止导航服务
-echo '{"type":"nav","start":false}' | nc -u -w1 127.0.0.1 11302
-```
-
-### 3.3 指令执行动作
-
-| 指令 | 动作 |
+| 职责 | 说明 |
 |------|------|
-| `nav start=true` | 若 `uav_guide.launch` 未运行则启动（xterm / tmux / 后台日志） |
-| `nav start=false` | 停止 `uav_guide.launch` |
-| `guide start=true` | 启动 `mssn/guide_package` + `mssn/guide_executable`（默认空，不启用） |
-| `mode` | 发布 `/uav_guide/intercept_mode_cmd`（head-on / tail）；`ensure_nav_on_mode=true` 时先确保 launch 已启动 |
+| 发射距离判断 | 订阅 `/uav/state` + `/target/state`，`mission/check_hz`(10Hz) 算欧氏距离，`dist < launch_dist_m`(7km) → 发布 `/uav/launch_cmd`（std_msgs/Bool，latch） |
+| 命中上报 | 订阅 `/target/crashed`，true 时按命中协议经 UDP 发 `encodeHitEvent(target_key, t)` 到 `cmd/remote_host:cmd/remote_port`(9100) |
+| 自动拉起 | 启动时 tmux 依次拉起 `uav_guide.launch`（主循环）与 `uav_bridge.launch`（udp_receiver + udp_sender）两个窗口 |
 
-### 3.4 状态回传（可选）
-
-- 开关：`cmd/report_enable`（默认 `false`）
-- 频率：`cmd/status_poll_hz`（默认 2Hz）
-- 目标：`cmd/remote_host:cmd/remote_port`（默认 `127.0.0.1:11303`）
-
-状态 JSON：
-
-```json
-{"type":"status","nav":true,"guide":false,"tracking":false,
- "mode":"head-on","uav":[1000.0,1000.0,500.0],"target":[4500.0,2500.0,600.0]}
-```
-
-字段：
-- `nav`：`uav_guide.launch` 是否运行
-- `guide`：辅助进程是否运行
-- `tracking`：`/uav_guide/tracking_mode` 是否进入 TRACKING
-- `mode`：当前拦截模式（`/uav_guide/intercept_mode`）
-- `uav` / `target`：本机 / 目标位置 `[x, y, z]`
+发射许可由主循环 `guide_core` 消费：`launch_cmd=false` 且仍停发射原点 → 待命；离开原点后不再检测。
 
 ---
 
@@ -125,13 +81,13 @@ echo '{"type":"nav","start":false}' | nc -u -w1 127.0.0.1 11302
 
 | 话题 | 类型 | 方向 | 说明 |
 |------|------|------|------|
-| `/target/state` | nav_msgs/Odometry | udp_receiver → | 目标位姿（卡尔曼 40Hz） |
-| `/uav/state` | nav_msgs/Odometry | udp_receiver → | 本机位姿（20Hz，起点） |
-| `/uav/init_pos` | geometry_msgs/PoseStamped | udp_receiver → | 初始位置（1Hz latch） |
-| `/uav/init_heading` | std_msgs/Float64 | udp_receiver → | 初始朝向（1Hz latch） |
-| `/uav_guide/intercept_mode_cmd` | std_msgs/String | udp_mssn_bridge → | 模式切换指令（head-on/tail） |
-| `/uav_guide/intercept_mode` | std_msgs/String | ← | 当前模式状态（订阅缓存） |
-| `/uav/cmd_roll|pitch|climb` | std_msgs/Float64 | simulation_loop → | uav_dynamic 控制指令（调试） |
+| `/target/state` | nav_msgs/Odometry | udp_receiver → | 目标位姿（位置直解+差分速度/姿态角速度） |
+| `/uav/state` | nav_msgs/Odometry | uav_guide_loop → | 本机位姿（主循环发布，供 udp_sender 外发） |
+| `/uav/init_pos` | geometry_msgs/PoseStamped | udp_receiver → | 初始位置（latch） |
+| `/uav/init_heading` | std_msgs/Float64 | udp_receiver → | 初始朝向（latch） |
+| `/uav/relaunch` | std_msgs/Bool | udp_receiver → | 位置重置信号 |
+| `/uav/launch_cmd` | std_msgs/Bool | udp_mssn_bridge → | 发射许可（距离<阈值，latch） |
+| `/target/crashed` | std_msgs/Bool | uav_guide_loop → | 命中判定 |
 
 ---
 
