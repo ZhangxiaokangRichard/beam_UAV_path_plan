@@ -44,14 +44,19 @@ tmux kill-session -t roscore 2>/dev/null || true
 tmux kill-session -t udp_mssn_bridge 2>/dev/null || true
 
 # 1) roscore（tmux 会话；内层同样显式 source）
-echo "[start] starting roscore in tmux session 'roscore' ..."
-tmux new-session -d -s roscore "source '$ROS_SETUP'; roscore"
-sleep 5
+#    若 roscore 已在运行（如容器 entrypoint 已拉起），跳过避免端口冲突
 if ! pgrep -f "rosmaster" >/dev/null 2>&1; then
-    echo "[FATAL] roscore failed to start"
-    exit 1
+    echo "[start] starting roscore in tmux session 'roscore' ..."
+    tmux new-session -d -s roscore "source '$ROS_SETUP'; roscore"
+    sleep 5
+    if ! pgrep -f "rosmaster" >/dev/null 2>&1; then
+        echo "[FATAL] roscore failed to start"
+        exit 1
+    fi
+    echo "[start] roscore OK"
+else
+    echo "[start] roscore already running, skip"
 fi
-echo "[start] roscore OK"
 
 # 2) udp_mssn_bridge（tmux 会话）——入口：tmux 运行 udp_mssn_bridge.launch
 #    （该 launch 内的 uav_guide / uav_bridge 两个窗口由节点按
