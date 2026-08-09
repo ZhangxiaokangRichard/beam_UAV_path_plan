@@ -1,9 +1,16 @@
-# beam_dubins 自动启动服务（tmux 方式，无头环境）— UDP 版服务入口
+# ═══════════════════════════════════════════════════════════════
+# beam_dubins 自动启动服务（tmux 方式，无头/容器环境）— UDP 版服务入口
+#
 # 安装到 /etc/systemd/system/beam_dubins_autostart.service 后：
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now beam_dubins_autostart
 #   sudo systemctl status beam_dubins_autostart
 # 查看 tmux 输出：tmux attach -t roscore / -t udp_mssn_bridge
+#
+# ⚠ 环境说明：systemd 不加载 ~/.bashrc；ROS 与工作空间环境由
+#   start/stop 脚本内部显式 source（不依赖登录 shell），Docker 打包时
+#   按镜像内路径修改 WS_ROOT / WS_SETUP 及脚本路径即可。
+# ═══════════════════════════════════════════════════════════════
 
 [Unit]
 Description=beam_dubins_udp_service
@@ -15,6 +22,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 User=aos-dev
+# 显式环境（不依赖 ~/.bashrc）；start 脚本内部还会再显式 source 一次 ROS/工作空间环境
 Environment="HOME=/home/aos-dev"
 Environment="USER=aos-dev"
 Environment="ROS_DISTRO=noetic"
@@ -22,6 +30,9 @@ Environment="ROS_MASTER_URI=http://localhost:11311"
 Environment="ROS_HOSTNAME=localhost"
 Environment="ROS_PYTHON_VERSION=3"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin:/opt/ros/noetic/bin"
+# 工作空间路径（Docker 打包时改为镜像内路径，如 /opt/ws）
+Environment="WS_ROOT=/home/aos-dev/catkin_ws"
+Environment="WS_SETUP=/home/aos-dev/catkin_ws/devel/setup.bash"
 WorkingDirectory=/home/aos-dev/catkin_ws
 ExecStart=/home/aos-dev/catkin_ws/src/aos-ljd-beam-pathplan/ros_udp_bridge/scripts/start_udp_mssn_bridge.sh
 ExecStop=/home/aos-dev/catkin_ws/src/aos-ljd-beam-pathplan/ros_udp_bridge/scripts/stop_udp_mssn_bridge.sh

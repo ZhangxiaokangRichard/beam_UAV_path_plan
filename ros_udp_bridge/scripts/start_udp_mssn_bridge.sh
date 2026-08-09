@@ -1,21 +1,41 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# 启动 roscore + udp_mssn_bridge（tmux 会话，适合无窗口环境）
+# 启动 roscore + udp_mssn_bridge（tmux 会话，适合无窗口/容器环境）
 #
 #   tmux attach -t roscore             查看 roscore
 #   tmux attach -t udp_mssn_bridge     查看 udp_mssn_bridge
 #   tmux kill-session -t <name>        手动停止某会话
+#
+# ⚠ 环境说明：本脚本不依赖 ~/.bashrc（systemd / Docker 等非登录环境
+#   不会加载它）。ROS 与工作空间环境在脚本内以及每个 tmux 会话的
+#   内层命令中都显式 source；路径可用环境变量覆盖，便于 Docker 打包：
+#     ROS_DISTRO   ROS_SETUP   WS_ROOT   WS_SETUP
 # ═══════════════════════════════════════════════════════════════
 set -eo pipefail
 
-# ── ROS 环境 ──
-export ROS_DISTRO=noetic
-export ROS_MASTER_URI=http://localhost:11311
-export ROS_HOSTNAME=localhost
+# ── 可配置路径（优先取环境变量，便于 systemd / Docker 注入） ──
+export ROS_DISTRO="${ROS_DISTRO:-noetic}"
+export WS_ROOT="${WS_ROOT:-/home/aos-dev/catkin_ws}"
+export WS_SETUP="${WS_SETUP:-${WS_ROOT}/devel/setup.bash}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${ROS_DISTRO}/setup.bash}"
+
+export ROS_MASTER_URI="${ROS_MASTER_URI:-http://localhost:11311}"
+export ROS_HOSTNAME="${ROS_HOSTNAME:-localhost}"
 export ROS_PYTHON_VERSION=3
 
-source /opt/ros/noetic/setup.bash
-source /home/aos-dev/catkin_ws/devel/setup.bash
+# ── 显式载入 ROS + 工作空间环境（不依赖 ~/.bashrc） ──
+if [ ! -f "$ROS_SETUP" ]; then
+    echo "[FATAL] 未找到系统 ROS 环境：$ROS_SETUP（请检查 ROS_DISTRO / ROS_SETUP）" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$ROS_SETUP"
+# shellcheck disable=SC1090
+if [ -f "$WS_SETUP" ]; then
+    source "$WS_SETUP"
+else
+    echo "[warn] 未找到工作空间环境：$WS_SETUP（仅载入系统 ROS 环境）" >&2
+fi
 
 command -v tmux >/dev/null 2>&1 || { echo "[start] tmux not installed"; exit 1; }
 
@@ -23,9 +43,9 @@ command -v tmux >/dev/null 2>&1 || { echo "[start] tmux not installed"; exit 1; 
 tmux kill-session -t roscore 2>/dev/null || true
 tmux kill-session -t udp_mssn_bridge 2>/dev/null || true
 
-# 1) roscore（tmux 会话）
+# 1) roscore（tmux 会话；内层同样显式 source）
 echo "[start] starting roscore in tmux session 'roscore' ..."
-tmux new-session -d -s roscore "source /opt/ros/noetic/setup.bash; roscore"
+tmux new-session -d -s roscore "source '$ROS_SETUP'; roscore"
 sleep 5
 if ! pgrep -f "rosmaster" >/dev/null 2>&1; then
     echo "[FATAL] roscore failed to start"
@@ -33,10 +53,12 @@ if ! pgrep -f "rosmaster" >/dev/null 2>&1; then
 fi
 echo "[start] roscore OK"
 
-# 2) udp_mssn_bridge（tmux 会话）
+# 2) udp_mssn_bridge（tmux 会话）——入口：tmux 运行 udp_mssn_bridge.launch
+#    （该 launch 内的 uav_guide / uav_bridge 两个窗口由节点按
+#     udp_mssn_bridge.yaml mssn/setup_shell 再显式 source 后启动）
 echo "[start] launching udp_mssn_bridge in tmux session 'udp_mssn_bridge' ..."
 tmux new-session -d -s udp_mssn_bridge \
-    "source /opt/ros/noetic/setup.bash; source /home/aos-dev/catkin_ws/devel/setup.bash; roslaunch ros_udp_bridge udp_mssn_bridge.launch"
+    "source '$ROS_SETUP' && source '$WS_SETUP' && roslaunch ros_udp_bridge udp_mssn_bridge.launch"
 
 echo "[start] done. tmux sessions: roscore, udp_mssn_bridge"
 echo "[start] 指令入口: UDP 127.0.0.1:11302  (见 UDP_INTERFACE.md)"
