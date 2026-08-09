@@ -153,4 +153,13 @@ std::string encodeStatusReport(bool nav_running, bool guide_running, bool tracki
     return oss.str();
 }
 
+std::string encodeHitEvent(std::int64_t target_key, double t)
+{
+    // 命中事件：数值为 JSON number（非字符串），由 udp_mssn_bridge 在 crashed=true 时发送
+    std::ostringstream oss;
+    oss << "{\"type\":\"hit\",\"targetKey\":" << target_key
+        << ",\"t\":" << t << '}';
+    return oss.str();
+}
+
 }  // namespace ros_udp_bridge

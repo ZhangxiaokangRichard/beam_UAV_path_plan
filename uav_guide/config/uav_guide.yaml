@@ -23,7 +23,7 @@ target:
   tracking_entry_dist: 2400.0
   tracking_window: 100.0
   divergence_threshold: 3
-  velocity_align_deg: 70
+  velocity_align_deg: 80
   min_closure_m: 3.0          # head-on：每帧接近量 (m)
   min_closure_m_tail: 1.5     # tail：尾追相对接近较慢，阈值更低
   entry_hold_count: 1
@@ -31,13 +31,13 @@ target:
 # TRACKING 模式对外引导点偏移（飞控圆心盘旋，近似直飞目标）
 finalshot:
   offset_m_t: 750
-  offset_m: 50
+  offset_m: 20
   radius_m: 10.0
 
 # 对接 uav_dynamic 服务时使用的水平速度模值
 # （uav_dynamic 服务端 motion.speed_mps 为默认，此处可覆盖）
 dynamics:
-  speed_mps: 50.0
+  speed_mps: 200.0
 
 space:
   lx: 10000.0
@@ -48,9 +48,29 @@ space:
 output:
   planned_path_topic: /uav/planned_path
   dynamics_cmd_topic: /uav/cmd
+  uav_state_topic: /uav/state   # uav_state_update 发布的 uav 状态（与 target/state 同接口，供 udp_sender）
+  crashed_topic: /target/crashed    # 目标距离判定结果（std_msgs/Bool）
+  relaunch_topic: /uav/relaunch     # 位置重置信号（std_msgs/Bool，udp_receiver 发布）
 
-# 与 ros_udp_bridge geodesy 原点一致时的后备原点
+# 主循环（阶段 8）
+loop:
+  dt: 0.05                # 主循环周期 (s)，20Hz
+  launch_frames: 200      # 发射阶段帧数（沿当前朝向/姿态运动）
+  plan_interval: 2        # 每多少帧调用一次规划服务
+  crashed_dist_m: 20.0    # 攻击有效判定：uav/target 欧氏距离 < 该值 → 命中
+
+# 发射起点（后备 ENU 本地坐标 [x,y,z,yaw,pitch]）；优先使用下方 start_geodetic（经纬高 → ENU）
+start: [0.0, 0.0, 1.0, 0.0, 0.0]
+
+# 发射起点（经纬高）：uav_guide_loop 初始化时用 geodesy 锚点转换为 ENU 本地坐标并发布/打印日志
+start_geodetic:
+  latitude_deg: 30.3019811
+  longitude_deg: 104.1527530
+  altitude_m: 200.0
+  heading_deg: 0.0            # 正北 0°（协议航向：正北 0° 顺时针）
+
+# ENU 解算锚点（须与 ros_udp_bridge/udp_bridge.yaml 的 geodesy 一致，保证 start_geodetic 转换正确）
 geodesy:
-  origin_latitude_deg: 34.01396246
-  origin_longitude_deg: 116.92349937
+  origin_latitude_deg: 30.337989
+  origin_longitude_deg: 104.152629
   origin_altitude_m: 0.0

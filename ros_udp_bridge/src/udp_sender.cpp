@@ -27,6 +27,7 @@ public:
         nh_.param("bridge/uav_key", uav_key_s, std::string("425201827841"));
         nh_.param("bridge/target_key", target_key_s, std::string("30064967681"));
         nh_.param("bridge/uav_name", uav_name_, std::string("IM-01"));
+        nh_.param("bridge/uav_state_topic", uav_state_topic_, std::string("uav/uav_state"));
         uav_key_ = std::stoll(uav_key_s);
         target_key_ = std::stoll(target_key_s);
 
@@ -36,10 +37,10 @@ public:
         nh_.param("geodesy/origin_altitude_m", oalt, 0.0);
         geodesy_ = std::make_unique<ros_udp_bridge::Geodesy>(olat, olon, oalt);
 
-        sub_ = nh_.subscribe("/uav/state", 10, &UdpSender::onUavState, this);
+        sub_ = nh_.subscribe(uav_state_topic_, 10, &UdpSender::onUavState, this);
         socket_ = std::make_unique<ros_udp_bridge::UdpSocket>(4096, 100);
-        ROS_INFO("[udp_sender] -> %s:%d uav_key=%lld target_key=%lld",
-                 remote_host_.c_str(), remote_port_,
+        ROS_INFO("[udp_sender] %s -> %s:%d uav_key=%lld target_key=%lld",
+                 uav_state_topic_.c_str(), remote_host_.c_str(), remote_port_,
                  static_cast<long long>(uav_key_), static_cast<long long>(target_key_));
     }
 
@@ -76,6 +77,7 @@ private:
     std::int64_t uav_key_ = 0;
     std::int64_t target_key_ = 0;
     std::string uav_name_;
+    std::string uav_state_topic_;   // 订阅的 uav 状态话题（loop 发布的 uav/uav_state）
     std::unique_ptr<ros_udp_bridge::Geodesy> geodesy_;
     std::unique_ptr<ros_udp_bridge::UdpSocket> socket_;
     ros::Subscriber sub_;

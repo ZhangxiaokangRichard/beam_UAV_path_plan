@@ -1,17 +1,23 @@
 <launch>
+  <!-- 引导模式：real=真实外发（uav/state→udp_sender→真实外部，默认）；
+       sim=内部可视化（uav_guide_loop 发布 /uav/state、规划路径、origin_pos，无 udp_sender，
+       供 rviz_publisher 显示；rviz 由 start_guide_external.launch 单独启动） -->
+  <arg name="mode" default="real"/>
+
   <!-- 共享引导参数（拦截模式等） -->
   <rosparam file="$(find uav_guide)/config/uav_guide.yaml" command="load" ns="uav_guide"/>
 
-  <!-- Beam Dubins 规划服务 -->
+  <!-- Beam Dubins 规划服务（仅水平 xy 路径规划，输入为 uav/target 水平坐标与朝向 yaw） -->
   <include file="$(find beam_dubins)/launch/planner.launch"/>
   <rosparam file="$(find beam_dubins)/config/beam_dubins.yaml" command="load" ns="beam_dubins"/>
 
-  <!-- UDP 桥：提供 /uav/state, /target/state 及 UDP 收/发（替代原 MQTT 桥） -->
-  <include file="$(find ros_udp_bridge)/launch/udp_bridge.launch"/>
+  <!-- UDP 桥已拆出：由 uav_bridge.launch 在独立 tmux 窗口启动（udp_receiver + udp_sender） -->
 
-  <!-- 运动解算服务 /uav_dynamic/solve -->
+  <!-- 运动解算服务 /uav_dynamic/solve（含纵向高度 PI） -->
   <include file="$(find uav_dynamic)/launch/uav_dynamic.launch"/>
 
+  <!-- 引导主循环：uav_guide_loop_node（真实/可视化共用 guide_core.GuideCore），
+       发布 /uav/state + /uav/planned_path + /beam_dubins/origin_pos -->
   <node pkg="uav_guide" type="uav_guide_loop_node.py" name="uav_guide_loop" output="screen">
     <rosparam file="$(find uav_guide)/config/uav_guide.yaml" command="load"/>
   </node>

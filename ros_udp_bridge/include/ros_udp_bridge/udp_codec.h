@@ -53,4 +53,8 @@ std::string encodeStatusReport(bool nav_running, bool guide_running, bool tracki
                                double uav_x, double uav_y, double uav_z,
                                double tgt_x, double tgt_y, double tgt_z);
 
+/// 编码命中事件 JSON（UDP 发送）：{"type":"hit","targetKey":...,"t":...}
+/// 由 udp_mssn_bridge 在 /target/crashed=true 时发送（target_key 取自参数）。
+std::string encodeHitEvent(std::int64_t target_key, double t);
+
 }  // namespace ros_udp_bridge

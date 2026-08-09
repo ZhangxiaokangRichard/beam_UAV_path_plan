@@ -21,6 +21,7 @@ public:
         nh_.param("motion/bank_angle_max_deg", mp_.bank_angle_max_deg, 25.0);
         nh_.param("motion/g", mp_.g, 9.81);
         nh_.param("motion/lookahead_m", mp_.lookahead_m, 100.0);
+        nh_.param("motion/solve_hz", mp_.solve_hz, 20.0);
         nh_.param("dwa/sample_num", mp_.sample_num, 21);
         nh_.param("dwa/sample_window_rad", mp_.sample_window_rad, 0.2);
         nh_.param("dwa/roll_weight", mp_.roll_weight, 0.3);
@@ -34,6 +35,7 @@ public:
         nh_.param("vertical/solve_hz", solve_hz_, 20.0);
 
         // 指令平滑（阶段 7：控制状态/姿态角变化连续）
+        nh_.param("smooth/max_heading_step_rad", max_heading_step_, 0.2);
         nh_.param("smooth/max_roll_rate_radps",  max_roll_rate_,  0.35);
         nh_.param("smooth/max_alpha_rate_radps", max_alpha_rate_, 0.35);
         nh_.param("smooth/max_climb_rate_mps2",  max_climb_rate_, 2.0);
@@ -63,12 +65,16 @@ private:
         const double climb = uav_dynamic::verticalSolve(height_err, vp_, dt, alpha, integral_);
 
         // 指令平滑：对滚转/迎角/垂直速度做一阶速率限幅，保证姿态与速度指令连续
+        // 航向平滑：每步最大变化量 ≤ max_heading_step_rad（防航向突变）；
+        // 首帧以当前航向 cur_yaw 为基准，避免从发射阶段切换时的突跳
+        if (!has_heading_) { last_heading_ = cur_yaw; has_heading_ = true; }
+        const double heading_s = stepLimit(heading, max_heading_step_, last_heading_);
         const double roll_s   = rateLimit(roll,   max_roll_rate_,  dt, last_roll_,   has_last_);
         const double alpha_s  = rateLimit(alpha,  max_alpha_rate_, dt, last_alpha_,  has_last_);
         const double climb_s  = rateLimit(climb,  max_climb_rate_, dt, last_climb_,  has_last_);
 
         res.success = !req.path.empty();
-        res.heading_rad = heading;
+        res.heading_rad = heading_s;
         res.roll_rad = roll_s;
         res.pitch_rad = alpha_s;
         res.climb_mps = climb_s;
@@ -91,6 +97,20 @@ private:
         return last;
     }
 
+    /// 航向步长限幅：|Δ指令/帧| ≤ max_step（rad），跨 ±π 按最短角差 wrap 处理。
+    static double stepLimit(double val, double max_step, double& last)
+    {
+        const double kPi = 3.14159265358979323846;
+        double d = val - last;
+        while (d >  kPi) d -= 2.0 * kPi;
+        while (d < -kPi) d += 2.0 * kPi;
+        d = std::clamp(d, -max_step, max_step);
+        last += d;
+        while (last >  kPi) last -= 2.0 * kPi;
+        while (last < -kPi) last += 2.0 * kPi;
+        return last;
+    }
+
     ros::NodeHandle& nh_;
     ros::ServiceServer srv_;
     uav_dynamic::MotionParams mp_;
@@ -98,6 +118,9 @@ private:
     double solve_hz_ = 20.0;
     double integral_ = 0.0;   // 纵向积分状态
     // 指令平滑状态（阶段 7）
+    double max_heading_step_ = 0.2;
+    bool has_heading_ = false;
+    double last_heading_ = 0.0;
     double max_roll_rate_ = 0.35, max_alpha_rate_ = 0.35, max_climb_rate_ = 2.0;
     double last_roll_ = 0.0, last_alpha_ = 0.0, last_climb_ = 0.0;
     bool has_last_ = false;

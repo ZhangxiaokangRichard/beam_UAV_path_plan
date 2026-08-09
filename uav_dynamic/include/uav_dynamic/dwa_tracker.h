@@ -6,12 +6,13 @@
 
 namespace uav_dynamic {
 
-/// 水平运动参数（协调转弯律 + DWA）。
+/// 水平运动参数（前向步插值跟踪 + 协调转弯律）。
 struct MotionParams {
     double speed_mps = 50.0;
     double min_turn_radius_m = 500.0;
     double bank_angle_max_deg = 25.0;
     double g = 9.81;
+    double solve_hz = 20.0;    // 主循环更新频率（前向步 = speed_mps / solve_hz，如 50/20=2.5m）
     double lookahead_m = 100.0;
     int sample_num = 21;
     double sample_window_rad = 0.2;
@@ -38,12 +39,16 @@ struct SolveCmd {
 };
 
 /**
- * @brief 水平跟踪：DWA 航向采样 + 协调转弯律。
- * @param path  全局离散路径（起点≈uav 当前位置）
+ * @brief 水平跟踪：取 path 最后一个圆弧的入口切线航向（快速调整航向跟上 target）。
+ *   - 找 path 最后一个圆弧段（curvature≠0）的入口切点，提取圆心 C 与半径 R
+ *   - 目标航向 = 进入该圆前的切线航向指向（入口切点相对圆心角 ± 90°，不对 yaw 限幅）
+ *   - roll = 协调转弯律 sign·atan2(v², g·R)（左转正/右转负），限幅 ±bank_angle_max_deg
+ *   - 无圆弧（纯直线 Dubins）→ 沿当前 yaw 以巡航速度向前推算（roll=0）
+ * @param path  全局离散路径（起点≈uav 当前位置，PathPoint 含 curvature）
  * @param p     运动参数
  * @param cur_yaw  uav 当前航向（ENU 弧度）
  * @param roll_out  输出协调转弯滚转角（限幅）
- * @return 期望航向（ENU 弧度）
+ * @return 期望航向（ENU 弧度，归一化，不对 yaw 限幅）
  */
 double horizontalSolve(const std::vector<beam_dubins::PathPoint>& path,
                        const MotionParams& p,

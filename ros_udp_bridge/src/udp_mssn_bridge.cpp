@@ -1,39 +1,33 @@
 /**
  * @file udp_mssn_bridge.cpp
- * @brief 服务入口节点（移植自 ros_mqtt_bridge::mqtt_mssn_bridge，通信改为本地 UDP）。
+ * @brief 任务判断 / 命中上报节点（极简版）。
  *
- * 功能：
- *   - 监听本地 cmd.local_port（默认 11302）收 UDP 指令 JSON，一包一 JSON：
- *       {"type":"nav",  "start":true}   启动/停止 uav_guide.launch
- *       {"type":"guide","start":true}   启动/停止可配置辅助进程（默认无）
- *       {"type":"mode", "mode":"head-on"} | {"type":"mode","mode":"tail"}
- *       切换迎头/尾追拦截模式（发布 /uav_guide/intercept_mode_cmd）
- *   - 订阅 /uav_guide/intercept_mode（模式状态）、/uav/state、/target/state（位置），
- *     读取 /uav_guide/tracking_mode（tracking 状态）
- *   - 定时（status_poll_hz）通过 UDP 向 cmd.remote_host:remote_port 回传状态 JSON
- *     （{"type":"status", ...}，默认不开启）
+ * 职责（极度简化的工作流程）：
+ *  1. 订阅 /uav/state 与 /target/state，以 check_hz（默认 10Hz）计算二者欧氏距离；
+ *     距离 < launch_dist_m（默认 7km）→ 发布 /uav/launch_cmd = true（否则 false）；
+ *     未到阈值前持续打印监控日志。
+ *  2. 订阅 /target/crashed，为 true 时按命中协议通过 UDP socket 发送
+ *     含 target_key（参数配置）的 JSON 数据包（encodeHitEvent）。
+ *  3. 启动时用 tmux 依次拉起 uav_guide.launch（主循环）与 uav_bridge.launch
+ *     （udp_receiver / udp_sender）两个独立窗口。
  *
- * 进程管理：pgrep/pkill + xterm（有 DISPLAY）/ tmux（无头）/ 后台日志兜底。
- * JSON 编解码复用 ros_udp_bridge/udp_codec（sanitizeJsonBytes + property_tree）。
- * 自包含实现，不依赖 ros_mqtt_bridge（解耦）。
+ * 已移除：11302 指令接收（nav/guide/mode）、复杂进程管理（pgrep/xterm）、状态回传。
  */
 
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
-#include <std_msgs/String.h>
+#include <std_msgs/Bool.h>
 
-#include <atomic>
-#include <condition_variable>
-#include <cctype>
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
+#include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 
 #include "ros_udp_bridge/udp_codec.h"
@@ -41,9 +35,7 @@
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// 基础工具（与 mqtt_mssn_bridge 一致）
-// ---------------------------------------------------------------------------
+// ---- 精简 tmux 窗口启动工具 ----
 
 std::string trim(const std::string& s)
 {
@@ -52,59 +44,6 @@ std::string trim(const std::string& s)
     if (b == std::string::npos) return "";
     const size_t e = s.find_last_not_of(ws);
     return s.substr(b, e - b + 1);
-}
-
-std::string expandHome(const std::string& path)
-{
-    if (path.rfind("~/", 0) == 0) {
-        const char* home = std::getenv("HOME");
-        if (home) return std::string(home) + path.substr(1);
-    }
-    return path;
-}
-
-/// 首字符括号化，避免 pgrep/pkill -f 自匹配。
-std::string bracketFirst(const std::string& pattern)
-{
-    if (pattern.empty()) return pattern;
-    return "[" + pattern.substr(0, 1) + "]" + pattern.substr(1);
-}
-
-bool pgrep(const std::string& pattern)
-{
-    const std::string cmd = "pgrep -f '" + bracketFirst(pattern) + "' >/dev/null 2>&1";
-    const int rc = std::system(cmd.c_str());
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
-}
-
-void pkillMatch(const std::string& pattern)
-{
-    const std::string cmd = "pkill -f '" + bracketFirst(pattern) + "' >/dev/null 2>&1 || true";
-    std::system(cmd.c_str());
-}
-
-pid_t runDetached(const std::string& shell_cmd, const std::string& log_file)
-{
-    const pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        setsid();
-        const int fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        execl("/bin/bash", "bash", "-c", shell_cmd.c_str(), static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    return pid;
-}
-
-bool tmuxAvailable()
-{
-    const int rc = std::system("command -v tmux >/dev/null 2>&1");
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
 }
 
 std::string collapseToLine(const std::string& s)
@@ -138,52 +77,10 @@ void tmuxNewSession(const std::string& session, const std::string& shell_cmd)
     std::system(cmd.c_str());
 }
 
-/// 打开终端运行命令：有 DISPLAY 用 xterm，无头用 tmux，兜底后台日志。
-pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
-                       const std::string& log_file, std::string& session_out)
+/// 用 tmux 启动一个独立窗口。
+void launchTmuxWindow(const std::string& title, const std::string& shell_cmd)
 {
-    session_out.clear();
-    const char* display = std::getenv("DISPLAY");
-    if (display && display[0] != '\0') {
-        const pid_t pid = fork();
-        if (pid < 0) return -1;
-        if (pid == 0) {
-            setsid();
-            execlp("xterm", "xterm", "-hold", "-T", title.c_str(),
-                   "-geometry", "140x36", "-e", "bash", "-c", shell_cmd.c_str(),
-                   static_cast<char*>(nullptr));
-            _exit(127);
-        }
-        return pid;
-    }
-    if (tmuxAvailable()) {
-        session_out = sanitizeSessionName(title);
-        tmuxNewSession(session_out, shell_cmd);
-        ROS_INFO("[udp_mssn_bridge] 无 DISPLAY，以 tmux 会话 '%s' 启动"
-                 "（查看: tmux attach -t %s）", session_out.c_str(), session_out.c_str());
-        return 0;
-    }
-    ROS_WARN("[udp_mssn_bridge] 无 DISPLAY 且无 tmux，回退为后台日志方式启动 %s",
-             title.c_str());
-    return runDetached(shell_cmd, log_file);
-}
-
-std::string buildLaunchCmd(const std::string& setup_shell, const std::string& exec_part)
-{
-    const std::string shell = trim(setup_shell);
-    if (shell.empty()) return exec_part;
-    return shell + " && " + exec_part;
-}
-
-void stopProcessGroup(pid_t pid)
-{
-    if (pid <= 0) return;
-    if (kill(-pid, SIGTERM) != 0) return;
-    for (int i = 0; i < 30; ++i) {
-        if (kill(pid, 0) != 0) return;
-        usleep(100000);
-    }
-    kill(-pid, SIGKILL);
+    tmuxNewSession(sanitizeSessionName(title), shell_cmd);
 }
 
 }  // namespace
@@ -193,60 +90,48 @@ void stopProcessGroup(pid_t pid)
 // ---------------------------------------------------------------------------
 
 struct Config {
-    // UDP 接收（本地指令入口）
-    std::string local_host = "0.0.0.0";
-    int local_port = 11302;
-    int recv_buf = 1024;
-    int recv_timeout_ms = 100;
+    // 话题
+    std::string uav_state_topic = "/uav/state";
+    std::string target_state_topic = "/target/state";
+    std::string launch_cmd_topic = "/uav/launch_cmd";
+    std::string crashed_topic = "/target/crashed";
 
-    // UDP 状态回传（可选）
+    // 发射判断
+    double check_hz = 10.0;          // 距离判断循环频率（Hz）
+    double launch_dist_m = 7000.0;   // uav-target 欧氏距离阈值（m）
+
+    // 命中协议发送
     std::string remote_host = "127.0.0.1";
-    int remote_port = 11303;
-    bool report_enable = false;
-    double status_hz = 2.0;
+    int remote_port = 9100;
+    std::int64_t target_key = 0;
 
-    // 进程管理
+    // tmux 窗口启动
     std::string setup_shell;
-    std::string launch_pkg = "uav_guide";
-    std::string launch_file = "uav_guide.launch";
-    std::string launch_match = "uav_guide.launch";
-    std::string guide_pkg;         // 辅助进程（guide 命令），默认空=不启用
-    std::string guide_exec;
-    std::string guide_match;
-    std::string log_dir = "~/.ros/udp_mssn_bridge/logs";
-    int launch_timeout_s = 30;
-    int guide_timeout_s = 15;
-    bool ensure_nav_on_mode = true;
+    std::string uav_guide_launch = "roslaunch uav_guide uav_guide.launch";
+    std::string uav_bridge_launch = "roslaunch ros_udp_bridge uav_bridge.launch";
 };
 
 Config loadConfig(ros::NodeHandle& nh)
 {
     Config c;
-    nh.param("cmd/local_host", c.local_host, c.local_host);
-    nh.param("cmd/local_port", c.local_port, c.local_port);
-    nh.param("cmd/recv_buf_size", c.recv_buf, c.recv_buf);
-    nh.param("cmd/recv_timeout_ms", c.recv_timeout_ms, c.recv_timeout_ms);
+    std::string target_key_s = "30064967681";
+
+    nh.param("cmd/uav_state_topic", c.uav_state_topic, c.uav_state_topic);
+    nh.param("cmd/target_state_topic", c.target_state_topic, c.target_state_topic);
+    nh.param("cmd/launch_cmd_topic", c.launch_cmd_topic, c.launch_cmd_topic);
+    nh.param("cmd/crashed_topic", c.crashed_topic, c.crashed_topic);
+
+    nh.param("mission/check_hz", c.check_hz, c.check_hz);
+    nh.param("mission/launch_dist_m", c.launch_dist_m, c.launch_dist_m);
 
     nh.param("cmd/remote_host", c.remote_host, c.remote_host);
     nh.param("cmd/remote_port", c.remote_port, c.remote_port);
-    nh.param("cmd/report_enable", c.report_enable, c.report_enable);
-    nh.param("cmd/status_poll_hz", c.status_hz, c.status_hz);
+    nh.param("cmd/target_key", target_key_s, target_key_s);
+    c.target_key = std::stoll(target_key_s);
 
-    nh.param("mssn/setup_shell", c.setup_shell,
-             std::string("source /opt/ros/noetic/setup.bash\n"
-                         "source ~/catkin_ws/devel/setup.bash"));
-    nh.param("mssn/launch_package", c.launch_pkg, c.launch_pkg);
-    nh.param("mssn/launch_file", c.launch_file, c.launch_file);
-    nh.param("mssn/launch_match", c.launch_match, c.launch_match);
-    nh.param("mssn/guide_package", c.guide_pkg, c.guide_pkg);
-    nh.param("mssn/guide_executable", c.guide_exec, c.guide_exec);
-    nh.param("mssn/guide_match", c.guide_match, c.guide_match);
-    nh.param("mssn/log_dir", c.log_dir, c.log_dir);
-    nh.param("mssn/launch_startup_timeout_s", c.launch_timeout_s, c.launch_timeout_s);
-    nh.param("mssn/guide_startup_timeout_s", c.guide_timeout_s, c.guide_timeout_s);
-    nh.param("mssn/ensure_nav_on_mode", c.ensure_nav_on_mode, c.ensure_nav_on_mode);
-
-    c.log_dir = expandHome(c.log_dir);
+    nh.param("mssn/setup_shell", c.setup_shell, c.setup_shell);
+    nh.param("mssn/uav_guide_launch", c.uav_guide_launch, c.uav_guide_launch);
+    nh.param("mssn/uav_bridge_launch", c.uav_bridge_launch, c.uav_bridge_launch);
     return c;
 }
 
@@ -259,283 +144,145 @@ public:
     UdpMssnBridge(ros::NodeHandle& nh, const Config& cfg)
         : nh_(nh), cfg_(cfg)
     {
-        const std::string mkdir = "mkdir -p '" + cfg_.log_dir + "' >/dev/null 2>&1 || true";
-        std::system(mkdir.c_str());
+        uav_sub_ = nh_.subscribe(cfg_.uav_state_topic, 1,
+                                 &UdpMssnBridge::onUavState, this);
+        target_sub_ = nh_.subscribe(cfg_.target_state_topic, 1,
+                                    &UdpMssnBridge::onTargetState, this);
+        crashed_sub_ = nh_.subscribe(cfg_.crashed_topic, 1,
+                                     &UdpMssnBridge::onCrashed, this);
+        launch_pub_ = nh_.advertise<std_msgs::Bool>(cfg_.launch_cmd_topic, 1, true);
 
-        // ROS 侧：订阅模式状态、发布模式切换命令
-        mode_sub_ = nh_.subscribe("/uav_guide/intercept_mode", 1,
-                                  &UdpMssnBridge::onInterceptMode, this);
-        mode_cmd_pub_ = nh_.advertise<std_msgs::String>("/uav_guide/intercept_mode_cmd", 1);
+        // 先用 tmux 拉起主循环与 bridge 两个独立窗口
+        ensureWindows();
 
-        // ROS 侧：订阅本机/目标位姿（用于状态上报）
-        uav_sub_ = nh_.subscribe("/uav/state", 1, &UdpMssnBridge::onUavState, this);
-        target_sub_ = nh_.subscribe("/target/state", 1, &UdpMssnBridge::onTargetState, this);
-
-        // UDP 接收线程
-        recv_thread_ = std::thread(&UdpMssnBridge::recvLoop, this);
-        // 命令处理 / 状态上报线程
-        worker_ = std::thread(&UdpMssnBridge::workerLoop, this);
-        if (cfg_.report_enable) poller_ = std::thread(&UdpMssnBridge::pollerLoop, this);
-
-        ROS_INFO("[udp_mssn_bridge] ready, listen udp %s:%d report=%s(%s:%d)",
-                 cfg_.local_host.c_str(), cfg_.local_port,
-                 cfg_.report_enable ? "on" : "off",
-                 cfg_.remote_host.c_str(), cfg_.remote_port);
-    }
-
-    ~UdpMssnBridge() { shutdown(); }
-
-    void shutdown()
-    {
-        stop_ = true;
-        cv_.notify_all();
-        if (recv_thread_.joinable()) recv_thread_.join();
-        if (worker_.joinable()) worker_.join();
-        if (poller_.joinable()) poller_.join();
+        socket_ = std::make_unique<ros_udp_bridge::UdpSocket>(1024, 100);
+        timer_ = nh_.createTimer(
+            ros::Duration(1.0 / std::max(cfg_.check_hz, 0.1)),
+            &UdpMssnBridge::onTimer, this);
+        ROS_INFO("[udp_mssn_bridge] ready: dist<%.0fm -> %s | hit event -> %s:%d "
+                 "target_key=%lld",
+                 cfg_.launch_dist_m, cfg_.launch_cmd_topic.c_str(),
+                 cfg_.remote_host.c_str(), cfg_.remote_port,
+                 static_cast<long long>(cfg_.target_key));
     }
 
 private:
-    struct CmdMsg { std::string payload; std::string from_ip; };
-
-    // ---- UDP 接收线程 ----
-
-    void recvLoop()
-    {
-        ros_udp_bridge::UdpSocket sock(cfg_.recv_buf, cfg_.recv_timeout_ms);
-        if (!sock.bind(cfg_.local_host, static_cast<std::uint16_t>(cfg_.local_port))) {
-            ROS_FATAL("[udp_mssn_bridge] bind %s:%d failed",
-                      cfg_.local_host.c_str(), cfg_.local_port);
-            return;
-        }
-        ROS_INFO("[udp_mssn_bridge] listening %s:%d",
-                 cfg_.local_host.c_str(), cfg_.local_port);
-        std::string data, ip;
-        std::uint16_t port = 0;
-        while (!stop_) {
-            if (!sock.recv(data, ip, port)) continue;
-            if (data.empty()) continue;
-            {
-                std::lock_guard<std::mutex> lock(q_mutex_);
-                q_.push({data, ip});
-            }
-            cv_.notify_one();
-        }
-    }
-
-    // ---- 命令处理（worker 线程，串行） ----
-
-    void workerLoop()
-    {
-        std::unique_lock<std::mutex> lock(q_mutex_);
-        while (!stop_) {
-            cv_.wait(lock, [this] { return stop_ || !q_.empty(); });
-            while (!q_.empty()) {
-                const CmdMsg msg = q_.front();
-                q_.pop();
-                lock.unlock();
-                handleCmd(msg);
-                lock.lock();
-            }
-        }
-    }
-
-    void handleCmd(const CmdMsg& msg)
-    {
-        ros_udp_bridge::UdpCmdMsg cmd;
-        std::string err;
-        if (!ros_udp_bridge::parseUdpCmd(msg.payload, cmd, err)) {
-            ROS_WARN("[udp_mssn_bridge] bad cmd from %s: %s", msg.from_ip.c_str(), err.c_str());
-            return;
-        }
-        if (cmd.type == "nav") {
-            ROS_INFO("[udp_mssn_bridge] cmd nav=%s", cmd.start ? "start" : "stop");
-            if (cmd.start) ensureLaunch();
-            else stopLaunch();
-        } else if (cmd.type == "guide") {
-            ROS_INFO("[udp_mssn_bridge] cmd guide=%s", cmd.start ? "start" : "stop");
-            if (cmd.start) startGuide();
-            else stopGuide();
-        } else if (cmd.type == "mode") {
-            ROS_INFO("[udp_mssn_bridge] cmd set intercept mode -> %s", cmd.mode.c_str());
-            if (cfg_.ensure_nav_on_mode) ensureLaunch();
-            std_msgs::String out;
-            out.data = cmd.mode;
-            mode_cmd_pub_.publish(out);
-        }
-        publishStatus();
-    }
-
-    // ---- 进程管理 ----
-
-    void ensureLaunch()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pgrep(cfg_.launch_match)) {
-            ROS_INFO("[udp_mssn_bridge] uav_guide.launch already running");
-            return;
-        }
-        const std::string cmd = buildLaunchCmd(
-            cfg_.setup_shell,
-            "exec roslaunch " + cfg_.launch_pkg + " " + cfg_.launch_file);
-        const std::string log = cfg_.log_dir + "/uav_guide_launch.log";
-        ROS_INFO("[udp_mssn_bridge] starting roslaunch %s %s", cfg_.launch_pkg.c_str(),
-                 cfg_.launch_file.c_str());
-        nav_pid_ = launchInTerminal("uav_guide.launch", cmd, log, nav_session_);
-        for (int i = 0; i < cfg_.launch_timeout_s * 2; ++i) {
-            if (pgrep(cfg_.launch_match)) {
-                ROS_INFO("[udp_mssn_bridge] uav_guide.launch started");
-                return;
-            }
-            usleep(500000);
-        }
-        ROS_ERROR("[udp_mssn_bridge] uav_guide.launch start timeout, check %s", log.c_str());
-    }
-
-    void startGuide()
-    {
-        if (cfg_.guide_pkg.empty() || cfg_.guide_exec.empty()) {
-            ROS_WARN("[udp_mssn_bridge] guide 辅助进程未配置（mssn/guide_package, mssn/guide_executable），忽略");
-            return;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!cfg_.guide_match.empty() && pgrep(cfg_.guide_match)) {
-            ROS_INFO("[udp_mssn_bridge] guide 辅助进程 already running");
-            return;
-        }
-        const std::string cmd = buildLaunchCmd(
-            cfg_.setup_shell,
-            "exec rosrun " + cfg_.guide_pkg + " " + cfg_.guide_exec);
-        const std::string log = cfg_.log_dir + "/guide.log";
-        ROS_INFO("[udp_mssn_bridge] starting guide 辅助进程 %s/%s",
-                 cfg_.guide_pkg.c_str(), cfg_.guide_exec.c_str());
-        guide_pid_ = launchInTerminal("guide_aux", cmd, log, guide_session_);
-        for (int i = 0; i < cfg_.guide_timeout_s * 2; ++i) {
-            if (!cfg_.guide_match.empty() && pgrep(cfg_.guide_match)) {
-                ROS_INFO("[udp_mssn_bridge] guide 辅助进程 started");
-                return;
-            }
-            usleep(500000);
-        }
-    }
-
-    void stopGuide()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!guide_session_.empty()) { tmuxKillSession(guide_session_); guide_session_.clear(); }
-        else stopProcessGroup(guide_pid_);
-        if (!cfg_.guide_match.empty()) pkillMatch(cfg_.guide_match);
-        guide_pid_ = -1;
-        ROS_INFO("[udp_mssn_bridge] guide 辅助进程 stopped");
-    }
-
-    void stopLaunch()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!nav_session_.empty()) { tmuxKillSession(nav_session_); nav_session_.clear(); }
-        else stopProcessGroup(nav_pid_);
-        pkillMatch(cfg_.launch_match);
-        nav_pid_ = -1;
-        ROS_INFO("[udp_mssn_bridge] uav_guide.launch stopped");
-    }
-
-    // ---- 状态上报 ----
-
-    void publishStatus()
-    {
-        bool nav = false, guide = false, tracking = false;
-        std::string mode;
-        double ux = 0, uy = 0, uz = 0, tx = 0, ty = 0, tz = 0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            nav = pgrep(cfg_.launch_match);
-            guide = (!cfg_.guide_match.empty()) && pgrep(cfg_.guide_match);
-            mode = intercept_mode_;
-            ux = uav_x_; uy = uav_y_; uz = uav_z_;
-            tx = tgt_x_; ty = tgt_y_; tz = tgt_z_;
-        }
-        ros::param::get("/uav_guide/tracking_mode", tracking);
-
-        const std::string json = ros_udp_bridge::encodeStatusReport(
-            nav, guide, tracking, mode, ux, uy, uz, tx, ty, tz);
-        ROS_DEBUG("[udp_mssn_bridge] status: %s", json.c_str());
-        if (!cfg_.report_enable) return;
-        std::lock_guard<std::mutex> lock(send_mutex_);
-        send_sock_.send(cfg_.remote_host, static_cast<std::uint16_t>(cfg_.remote_port), json);
-    }
-
-    void pollerLoop()
-    {
-        const double hz = cfg_.status_hz > 0.1 ? cfg_.status_hz : 2.0;
-        ros::Rate rate(hz);
-        while (ros::ok() && !stop_) {
-            publishStatus();
-            rate.sleep();
-        }
-    }
-
-    void onInterceptMode(const std_msgs::String::ConstPtr& msg)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        intercept_mode_ = msg->data;
-    }
+    // ---- 订阅回调 ----
 
     void onUavState(const nav_msgs::Odometry::ConstPtr& msg)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        uav_x_ = msg->pose.pose.position.x;
-        uav_y_ = msg->pose.pose.position.y;
-        uav_z_ = msg->pose.pose.position.z;
+        uav_ = {{msg->pose.pose.position.x, msg->pose.pose.position.y,
+                 msg->pose.pose.position.z}, true};
     }
 
     void onTargetState(const nav_msgs::Odometry::ConstPtr& msg)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        tgt_x_ = msg->pose.pose.position.x;
-        tgt_y_ = msg->pose.pose.position.y;
-        tgt_z_ = msg->pose.pose.position.z;
+        tgt_ = {{msg->pose.pose.position.x, msg->pose.pose.position.y,
+                 msg->pose.pose.position.z}, true};
+    }
+
+    void onCrashed(const std_msgs::Bool::ConstPtr& msg)
+    {
+        const bool hit = msg->data;
+        if (hit && !hit_sent_) {
+            hit_sent_ = true;
+            sendHitEvent();
+            ROS_INFO("[udp_mssn_bridge] ★ 命中（/target/crashed=true）→ 发送 hit 事件 "
+                     "target_key=%lld -> %s:%d",
+                     static_cast<long long>(cfg_.target_key),
+                     cfg_.remote_host.c_str(), cfg_.remote_port);
+        } else if (!hit) {
+            hit_sent_ = false;
+        }
+    }
+
+    // ---- 距离判断（10Hz） ----
+
+    void onTimer(const ros::TimerEvent&)
+    {
+        bool has_uav = false, has_tgt = false;
+        double ux = 0, uy = 0, uz = 0, tx = 0, ty = 0, tz = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            has_uav = uav_.second;
+            has_tgt = tgt_.second;
+            if (has_uav) { ux = uav_.first[0]; uy = uav_.first[1]; uz = uav_.first[2]; }
+            if (has_tgt) { tx = tgt_.first[0]; ty = tgt_.first[1]; tz = tgt_.first[2]; }
+        }
+        if (!has_uav || !has_tgt) {
+            ROS_WARN_THROTTLE(1.0, "[udp_mssn_bridge] 等待 uav/target 状态...");
+            return;
+        }
+        const double dist = std::hypot(ux - tx, std::hypot(uy - ty, uz - tz));
+        const bool allow = dist < cfg_.launch_dist_m;
+        if (allow != launch_cmd_) {
+            launch_cmd_ = allow;
+            std_msgs::Bool m;
+            m.data = allow;
+            launch_pub_.publish(m);
+            ROS_INFO("[udp_mssn_bridge] /uav/launch_cmd -> %s (dist=%.1fkm)",
+                     allow ? "true" : "false", dist / 1000.0);
+        }
+        if (allow) {
+            ROS_INFO_THROTTLE(2.0, "[udp_mssn_bridge] 允许发射：dist=%.1fkm < %.1fkm",
+                              dist / 1000.0, cfg_.launch_dist_m / 1000.0);
+        } else {
+            ROS_WARN_THROTTLE(2.0, "[udp_mssn_bridge] 监控：dist=%.1fkm，未到发射阈值 %.1fkm",
+                              dist / 1000.0, cfg_.launch_dist_m / 1000.0);
+        }
+    }
+
+    // ---- 命中协议：UDP 发送含 target_key 的 JSON 数据包 ----
+
+    void sendHitEvent()
+    {
+        const double t = ros::Time::now().toSec();
+        const std::string json = ros_udp_bridge::encodeHitEvent(cfg_.target_key, t);
+        socket_->send(cfg_.remote_host, static_cast<std::uint16_t>(cfg_.remote_port), json);
+        ROS_DEBUG("[udp_mssn_bridge] sent %zuB %s", json.size(), json.c_str());
+    }
+
+    // ---- tmux 启动两个窗口 ----
+
+    void ensureWindows()
+    {
+        const std::string shell = trim(cfg_.setup_shell);
+        const std::string guide = shell.empty() ? cfg_.uav_guide_launch
+                                                : shell + " && " + cfg_.uav_guide_launch;
+        const std::string bridge = shell.empty() ? cfg_.uav_bridge_launch
+                                                 : shell + " && " + cfg_.uav_bridge_launch;
+        ROS_INFO("[udp_mssn_bridge] tmux 启动窗口 uav_guide.launch ...");
+        launchTmuxWindow("uav_guide", guide);
+        ROS_INFO("[udp_mssn_bridge] tmux 启动窗口 uav_bridge.launch ...");
+        launchTmuxWindow("uav_bridge", bridge);
     }
 
     // ---- 成员 ----
 
     ros::NodeHandle& nh_;
     const Config& cfg_;
-    ros::Subscriber mode_sub_;
-    ros::Publisher mode_cmd_pub_;
     ros::Subscriber uav_sub_;
     ros::Subscriber target_sub_;
+    ros::Subscriber crashed_sub_;
+    ros::Publisher launch_pub_;
+    ros::Timer timer_;
+    std::unique_ptr<ros_udp_bridge::UdpSocket> socket_;
 
     std::mutex mutex_;
-    pid_t nav_pid_ = -1;
-    pid_t guide_pid_ = -1;
-    std::string nav_session_;
-    std::string guide_session_;
-    std::string intercept_mode_ = "unknown";
-    double uav_x_ = 0, uav_y_ = 0, uav_z_ = 0;
-    double tgt_x_ = 0, tgt_y_ = 0, tgt_z_ = 0;
-
-    std::mutex q_mutex_;
-    std::queue<CmdMsg> q_;
-    std::condition_variable cv_;
-    std::thread recv_thread_;
-    std::thread worker_;
-    std::thread poller_;
-    std::atomic<bool> stop_{false};
-
-    std::mutex send_mutex_;
-    ros_udp_bridge::UdpSocket send_sock_{4096, 100};
+    std::pair<std::array<double, 3>, bool> uav_{{{0, 0, 0}}, false};
+    std::pair<std::array<double, 3>, bool> tgt_{{{0, 0, 0}}, false};
+    bool launch_cmd_ = false;
+    bool hit_sent_ = false;
 };
-
-// ---------------------------------------------------------------------------
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "udp_mssn_bridge");
     ros::NodeHandle nh;
     const Config cfg = loadConfig(nh);
-
     UdpMssnBridge bridge(nh, cfg);
-
     ros::spin();
-    bridge.shutdown();
     return 0;
 }

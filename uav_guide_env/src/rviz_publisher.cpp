@@ -13,7 +13,9 @@
  */
 
 #include <ros/ros.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
 #include <std_msgs/String.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
@@ -174,8 +176,11 @@ static visualization_msgs::Marker makeStatusTextMarker(
 
 static nav_msgs::Odometry g_last_uav_odom;
 static nav_msgs::Odometry g_last_target_odom;
+static nav_msgs::Path g_last_path;                 // 规划路径（uav_guide_loop 发布 /uav/planned_path）
+static geometry_msgs::PoseStamped g_origin_pos;     // 全局原点（uav_guide_loop 发布 /beam_dubins/origin_pos）
 static bool g_has_uav    = false;
 static bool g_has_target = false;
+static bool g_has_path   = false;
 
 // ═══════════════════════════════════════════════════════════════
 // 目标状态回调（获取当前 goal_y 用于动态障碍物更新）
@@ -216,6 +221,19 @@ static void uavStateCallback(const nav_msgs::Odometry::ConstPtr& msg)
     g_has_uav = true;
 }
 
+// 规划路径回调（uav_guide_loop 发布 /uav/planned_path）
+static void pathCallback(const nav_msgs::Path::ConstPtr& msg)
+{
+    g_last_path = *msg;
+    g_has_path = true;
+}
+
+// 全局原点回调（uav_guide_loop 发布 /beam_dubins/origin_pos）
+static void originCallback(const geometry_msgs::PoseStamped::ConstPtr& msg)
+{
+    g_origin_pos = *msg;
+}
+
 /// 构建 UAV 3D 模型 Marker（大号橙色箭头 + 发光球体，确保 10km 尺度可见）
 static visualization_msgs::Marker makeUavModelMarker(
     const nav_msgs::Odometry& odom)
@@ -234,7 +252,7 @@ static visualization_msgs::Marker makeUavModelMarker(
     double x = odom.pose.pose.position.x;
     double y = odom.pose.pose.position.y;
     double z = odom.pose.pose.position.z;
-    double shaft_len = 600.0;   // 箭头总长 600m（在 10km 地图上清晰可见）
+    double shaft_len = 1200.0;  // 箭头总长 1200m（大尺寸方便辨认）
 
     m.points.resize(2);
     m.points[0].x = x;
@@ -245,8 +263,8 @@ static visualization_msgs::Marker makeUavModelMarker(
     m.points[1].z = z;
 
     m.pose.orientation.w = 1.0;
-    m.scale.x = 30.0;   // 箭杆直径 (m)
-    m.scale.y = 80.0;   // 箭头直径 (m)
+    m.scale.x = 50.0;   // 箭杆直径 (m)
+    m.scale.y = 120.0;  // 箭头直径 (m)
 
     m.color.r = 1.0f;
     m.color.g = 0.45f;
@@ -271,9 +289,9 @@ static visualization_msgs::Marker makeUavSphereMarker(
     m.pose.position.y = odom.pose.pose.position.y;
     m.pose.position.z = odom.pose.pose.position.z;
     m.pose.orientation.w = 1.0;
-    m.scale.x = 100.0;   // 直径 100m 的球
-    m.scale.y = 100.0;
-    m.scale.z = 100.0;
+    m.scale.x = 220.0;   // 直径 220m（大尺寸方便辨认）
+    m.scale.y = 220.0;
+    m.scale.z = 220.0;
     m.color.r = 1.0f;
     m.color.g = 0.45f;
     m.color.b = 0.0f;
@@ -297,9 +315,9 @@ static visualization_msgs::Marker makeTargetModelMarker(
     m.pose.position.y = odom.pose.pose.position.y;
     m.pose.position.z = odom.pose.pose.position.z;
     m.pose.orientation.w = 1.0;
-    m.scale.x = 120.0;   // 直径 120m
-    m.scale.y = 120.0;
-    m.scale.z = 120.0;
+    m.scale.x = 260.0;   // 直径 260m（大尺寸方便辨认）
+    m.scale.y = 260.0;
+    m.scale.z = 260.0;
     m.color.r = 1.0f;
     m.color.g = 0.15f;
     m.color.b = 0.15f;
@@ -325,7 +343,7 @@ static visualization_msgs::Marker makeTargetArrowMarker(
     double x = odom.pose.pose.position.x;
     double y = odom.pose.pose.position.y;
     double z = odom.pose.pose.position.z;
-    double shaft_len = 400.0;
+    double shaft_len = 900.0;   // 箭头总长 900m（大尺寸方便辨认）
 
     m.points.resize(2);
     m.points[0].x = x;
@@ -336,8 +354,8 @@ static visualization_msgs::Marker makeTargetArrowMarker(
     m.points[1].z = z;
 
     m.pose.orientation.w = 1.0;
-    m.scale.x = 20.0;
-    m.scale.y = 60.0;
+    m.scale.x = 40.0;
+    m.scale.y = 100.0;
 
     m.color.r = 1.0f;
     m.color.g = 0.15f;
@@ -490,6 +508,10 @@ int main(int argc, char** argv)
              state.uav_start_x, state.uav_start_y, state.uav_start_z,
              state.target_init_x, state.target_init_y, state.target_init_z);
 
+    // ── 仿真 UAV 状态话题（外部仿真用 /uav/sim_state，避免与真实 /uav/state 竞争）──
+    std::string uav_state_topic = "/uav/state";
+    ros::param::param<std::string>("/simulation/uav_state_topic", uav_state_topic, uav_state_topic);
+
     // ── 订阅 ──────────────────────────────────────────────────
     ros::Subscriber sub_target = nh.subscribe<nav_msgs::Odometry>(
         "/target/state", 10,
@@ -497,7 +519,11 @@ int main(int argc, char** argv)
     ros::Subscriber sub_status = nh.subscribe<std_msgs::String>(
         "/sim/status", 10, simStatusCallback);
     ros::Subscriber sub_uav_state = nh.subscribe<nav_msgs::Odometry>(
-        "/uav/state", 10, uavStateCallback);
+        uav_state_topic, 10, uavStateCallback);
+    ros::Subscriber sub_path = nh.subscribe<nav_msgs::Path>(
+        "/uav/planned_path", 10, pathCallback);
+    ros::Subscriber sub_origin = nh.subscribe<geometry_msgs::PoseStamped>(
+        "/beam_dubins/origin_pos", 10, originCallback);
 
     // ── 发布 ──────────────────────────────────────────────────
     // [已废弃] 障碍物 Publisher（通道墙壁由 approach_distance + 虚拟目标替代）
@@ -507,14 +533,14 @@ int main(int argc, char** argv)
         "/env/bounds", 10, true); // latched
     ros::Publisher pub_status_text = nh.advertise<visualization_msgs::Marker>(
         "/sim/status_text", 10);
-    ros::Publisher pub_uav_model   = nh.advertise<visualization_msgs::Marker>(
-        "/uav/model", 10);
+    ros::Publisher pub_uav_arrow   = nh.advertise<visualization_msgs::Marker>(
+        "/uav/rviz_arrow", 10);
     ros::Publisher pub_uav_sphere  = nh.advertise<visualization_msgs::Marker>(
-        "/uav/sphere", 10);
-    ros::Publisher pub_target_model = nh.advertise<visualization_msgs::Marker>(
-        "/target/model", 10);
+        "/uav/rviz_sphere", 10);
     ros::Publisher pub_target_arrow = nh.advertise<visualization_msgs::Marker>(
-        "/target/arrow", 10);
+        "/target/rviz_arrow", 10);
+    ros::Publisher pub_target_sphere = nh.advertise<visualization_msgs::Marker>(
+        "/target/rviz_sphere", 10);
 
     // ── 发布一次性（latched）Markers ─────────────────────────
     // 空间边界（不变，发布一次即可）
@@ -541,26 +567,26 @@ int main(int argc, char** argv)
             auto text_marker = makeStatusTextMarker(g_status_text);
             pub_status_text.publish(text_marker);
 
-            // ── UAV 3D 模型 Marker（橙色箭头）───────────────
+            // ── UAV 球体 + 箭头（橙色，大尺寸）───────────────
             if (g_has_uav) {
-                pub_uav_model.publish(makeUavModelMarker(g_last_uav_odom));
+                pub_uav_arrow.publish(makeUavModelMarker(g_last_uav_odom));
                 pub_uav_sphere.publish(makeUavSphereMarker(g_last_uav_odom));
             } else {
-                pub_uav_model.publish(makeDefaultUavMarker(
+                pub_uav_arrow.publish(makeDefaultUavMarker(
                     state.uav_start_x, state.uav_start_y, state.uav_start_z, state.uav_start_yaw));
                 pub_uav_sphere.publish(makeDefaultUavSphere(
                     state.uav_start_x, state.uav_start_y, state.uav_start_z));
             }
 
-            // ── 目标 3D 模型 Marker（红色球体 + 箭头）─────
+            // ── 目标球体 + 箭头（红色，大尺寸）───────────────
             if (g_has_target) {
-                pub_target_model.publish(makeTargetModelMarker(g_last_target_odom));
                 pub_target_arrow.publish(makeTargetArrowMarker(g_last_target_odom));
+                pub_target_sphere.publish(makeTargetModelMarker(g_last_target_odom));
             } else {
-                pub_target_model.publish(makeDefaultTargetMarker(
-                    state.target_init_x, state.target_init_y, state.target_init_z));
                 pub_target_arrow.publish(makeDefaultTargetArrow(
                     state.target_init_x, state.target_init_y, state.target_init_z, state.target_init_yaw));
+                pub_target_sphere.publish(makeDefaultTargetMarker(
+                    state.target_init_x, state.target_init_y, state.target_init_z));
             }
 
             ROS_INFO_THROTTLE(5.0, "[rviz_publisher] 1Hz tick#%d: has_uav=%d has_target=%d tgt=(%.0f,%.0f) yaw=%.1f°",
@@ -573,22 +599,22 @@ int main(int argc, char** argv)
     ros::Timer model_timer = nh.createTimer(ros::Duration(0.2),
         [&](const ros::TimerEvent&) {
             if (g_has_uav) {
-                pub_uav_model.publish(makeUavModelMarker(g_last_uav_odom));
+                pub_uav_arrow.publish(makeUavModelMarker(g_last_uav_odom));
                 pub_uav_sphere.publish(makeUavSphereMarker(g_last_uav_odom));
             } else {
-                pub_uav_model.publish(makeDefaultUavMarker(
+                pub_uav_arrow.publish(makeDefaultUavMarker(
                     state.uav_start_x, state.uav_start_y, state.uav_start_z, state.uav_start_yaw));
                 pub_uav_sphere.publish(makeDefaultUavSphere(
                     state.uav_start_x, state.uav_start_y, state.uav_start_z));
             }
             if (g_has_target) {
-                pub_target_model.publish(makeTargetModelMarker(g_last_target_odom));
                 pub_target_arrow.publish(makeTargetArrowMarker(g_last_target_odom));
+                pub_target_sphere.publish(makeTargetModelMarker(g_last_target_odom));
             } else {
-                pub_target_model.publish(makeDefaultTargetMarker(
-                    state.target_init_x, state.target_init_y, state.target_init_z));
                 pub_target_arrow.publish(makeDefaultTargetArrow(
                     state.target_init_x, state.target_init_y, state.target_init_z, state.target_init_yaw));
+                pub_target_sphere.publish(makeDefaultTargetMarker(
+                    state.target_init_x, state.target_init_y, state.target_init_z));
             }
             ROS_INFO_THROTTLE(5.0, "[rviz_publisher] 5Hz tick: has_uav=%d uav_pos=(%.0f,%.0f) has_target=%d tgt_pos=(%.0f,%.0f)",
                               g_has_uav, g_last_uav_odom.pose.pose.position.x, g_last_uav_odom.pose.pose.position.y,

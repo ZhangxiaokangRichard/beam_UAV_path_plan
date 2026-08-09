@@ -125,9 +125,13 @@ int main(int argc, char** argv)
             ext_state[0] = msg->pose.pose.position.x;
             ext_state[1] = msg->pose.pose.position.y;
             ext_state[2] = msg->pose.pose.position.z;
-            ext_state[3] = 2.0 * std::atan2(msg->pose.pose.orientation.z,
-                                            msg->pose.pose.orientation.w);
-            ext_state[4] = 0.0;
+            // 精确 yaw：atan2(qz,qw) 在 roll/pitch 非零时会失真
+            const tf::Quaternion q(msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
+                                   msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
+            double r = 0.0, p = 0.0, y = 0.0;
+            tf::Matrix3x3(q).getRPY(r, p, y);
+            ext_state[3] = y;
+            ext_state[4] = p;
             ext_has = true;
         };
         ros::Subscriber sub_ext = nh.subscribe<nav_msgs::Odometry>(ext_topic, 10, ext_cb);

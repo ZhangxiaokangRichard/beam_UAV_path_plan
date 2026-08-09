@@ -1,5 +1,6 @@
 <launch>
-  <!-- udp_mssn_bridge：本地 UDP 11302 指令入口（启停 uav_guide.launch / 切换拦截模式） -->
+  <!-- udp_mssn_bridge（极简版）：订阅 uav/target 状态 → 距离 < 阈值 → /uav/launch_cmd；
+       订阅 /target/crashed → 命中协议 UDP hit 事件；启动时 tmux 拉起两个窗口 -->
   <rosparam file="$(find ros_udp_bridge)/config/udp_mssn_bridge.yaml" command="load"/>
 
   <!-- respawn：节点异常退出后自动拉起 -->

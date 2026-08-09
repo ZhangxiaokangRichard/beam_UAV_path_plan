@@ -52,19 +52,7 @@ add_dependencies(uav_guide_env_core
   ${catkin_EXPORTED_TARGETS}
 )
 
-# ── simulation_loop 节点（Phase 3 v0.1）─────────────────────
-add_executable(simulation_loop
-  src/simulation_loop.cpp
-)
-target_link_libraries(simulation_loop
-  uav_guide_env_core
-  ${catkin_LIBRARIES}
-)
-add_dependencies(simulation_loop
-  beam_dubins_generate_messages_cpp
-  uav_dynamic_generate_messages_cpp
-  ${catkin_EXPORTED_TARGETS}
-)
+# ── simulation_loop 已统一到 uav_guide 包（Python simulation_loop_node.py，复用 guide_core.GuideCore） ──
 
 # sitl_loop.cpp removed — target disabled
 # add_executable(sitl_loop

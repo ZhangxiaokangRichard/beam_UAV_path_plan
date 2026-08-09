@@ -25,6 +25,12 @@ public:
     void reset(double init_state, double init_cov = 1.0) {
         x_ = init_state; p_ = init_cov;
     }
+    /// 重新设置噪声并重置状态（参数化滤波噪声用）。
+    void setNoise(double process_noise, double measure_noise,
+                  double init_state = 0.0, double init_cov = 1.0) {
+        q_ = process_noise; r_ = measure_noise;
+        x_ = init_state; p_ = init_cov;
+    }
 
 private:
     double q_, r_, x_, p_;
@@ -51,6 +57,10 @@ public:
 
     void reset(double vx0, double vy0) {
         kf_vx_.reset(vx0); kf_vy_.reset(vy0);
+    }
+    void setNoise(double process_noise, double measure_noise) {
+        kf_vx_.setNoise(process_noise, measure_noise);
+        kf_vy_.setNoise(process_noise, measure_noise);
     }
 
 private:

@@ -20,6 +20,14 @@ bool UdpSocket::bind(const std::string& host, std::uint16_t port)
     fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0) return false;
 
+    // 允许与诊断工具（udp_test --watch_target）共享同一端口，
+    // 便于同一次录制同时抓原始 JSON 与订阅 /target/state 对比（排查坐标偏移）
+    int reuse = 1;
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#ifdef SO_REUSEPORT
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+#endif
+
     sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;

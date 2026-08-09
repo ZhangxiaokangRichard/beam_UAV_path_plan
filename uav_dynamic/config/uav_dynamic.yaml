@@ -3,11 +3,12 @@
 # ═══════════════════════════════════════════════════════════════
 
 motion:
-  speed_mps: 50.0           # 水平速度模值（定速巡航，DWA 只改航向不改速度）
-  min_turn_radius_m: 500.0  # 最小转弯半径（协调转弯律参量）
+  speed_mps: 200.0           # 水平速度模值（定速巡航；越大前向步越大，跟踪越快）
+  min_turn_radius_m: 500.0  # 最小转弯半径（协调转弯律参量；越大转弯越缓）
   bank_angle_max_deg: 25.0  # 滚转角限幅（±25°）
   g: 9.81                   # 重力加速度
   lookahead_m: 100.0        # 水平前视距离（取路径期望点）
+  solve_hz: 20.0            # 主循环更新频率（前向步 = speed_mps / solve_hz，如 50/20=2.5m）
 
 dwa:
   sample_num: 21            # DWA 航向采样数
@@ -25,6 +26,7 @@ vertical:
 
 # 指令平滑（阶段 7：控制状态/姿态角变化连续）
 smooth:
+  max_heading_step_rad: 0.1     # 航向指令每步最大变化量（rad/步，20Hz 下 ~0.2rad≈11.5°/步，防突变）
   max_roll_rate_radps: 0.35     # 滚转指令变化率上限 (~20°/s)
   max_alpha_rate_radps: 0.35    # 迎角指令变化率上限 (~20°/s)
   max_climb_rate_mps2: 3.0      # 垂直速度指令变化率上限

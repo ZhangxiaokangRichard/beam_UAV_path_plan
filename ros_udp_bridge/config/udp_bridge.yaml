@@ -14,12 +14,26 @@ bridge:
   uav_key: "425201827841"       # 本机拦截弹 key（JSON.key 过滤；发射后按现场确认）。字符串，避免 XML-RPC int 溢出
   target_key: "30064967681"     # 目标 key（JSON.key 过滤，默认 E1）。字符串
   uav_name: IM-01             # 发送 red_interceptor 的 name
+  uav_state_topic: uav/state  # udp_sender 订阅的 uav 状态话题（uav_guide_loop 发布）
+
+# target 差分解算防护（非滤波；target/state 位置直解 + 差分速度/姿态角速度）
+filter:
+  cog_min_dist_m: 0.5         # 位置差低于该值视为坐标噪声，不解算速度
+  vel_deadband_mps: 0.5       # 速度输出死区：低于该值输出 0（清除噪声/数值下溢的虚假微小速度）
+
+relaunch:
+  gap_s: 5.0                 # uav UDP 断流超过该时长再收到 → 视为新发射（位置重置）
 
 init:
   heading_deg: 0.0            # 初始发射朝向默认值（角度制）；报文 heading 有效时优先用报文，默认 0°=正北
+  # warmup 兜底起飞点：启动 warmup_s 内未收到 uav_key 位姿时使用（该点非 ENU 解算锚点，仅起飞位置）
+  default_latitude_deg: 30.301803
+  default_longitude_deg: 104.152629
+  default_altitude_m: 1.0
+  warmup_s: 3.0               # 启动后先收该时长 UDP 做 warmup；未收到 uav 位姿则用默认起飞点
 
 target:
-  publish_hz: 40.0            # target/state 发布频率（卡尔曼估计速度/姿态）
+  publish_hz: 40.0            # target/state 发布频率（位置直解 + 差分速度/姿态角速度）
   publish_tf: true
   timeout_ms: 5000
 
@@ -31,7 +45,7 @@ init_pos:
   latch: true
 
 geodesy:
-  origin_latitude_deg: 30.337989   # 源坐标锚点（协议 §3）
+  origin_latitude_deg: 30.337989   # ENU 解算锚点（静态原点，协议 §3）；区别于 init 段默认起飞点
   origin_longitude_deg: 104.152629
-  origin_altitude_m: 493.0
+  origin_altitude_m: 0.0
   altitude_reference: ellipsoid

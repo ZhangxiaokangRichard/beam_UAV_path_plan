@@ -1,5 +1,5 @@
 <launch>
-  <!-- ros_udp_bridge：收包 / uav 初始化 / target 差分状态（位置直解+差分速度/姿态角速度） / UDP 发送 -->
+  <!-- uav_bridge：UDP 桥独立窗口（udp_receiver 收包/uav 初始化/target 差分状态 + udp_sender 外发） -->
   <!-- sender=true：启动 udp_sender（真实外发模式）；sender=false：仿真模式（不发真实外部） -->
   <arg name="sender" default="true"/>
   <rosparam file="$(find ros_udp_bridge)/config/udp_bridge.yaml" command="load"/>

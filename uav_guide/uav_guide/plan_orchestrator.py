@@ -177,11 +177,16 @@ class PlanOrchestrator:
         else:
             plan_goal = self._compute_virtual_goal(uav_state, target_state, intercept_mode)
 
+        # beam_dubins 仅做水平路径规划（xy 平面）：只使用 x/y 坐标与朝向 yaw。
+        # z 保留（供水平 Dubins 终点判定），pitch 不参与（2D 模式 use_3d=false），
+        # 纵向（高度/俯仰）由 uav_dynamic 的高度 PI 控制。
         req = PlanPathRequest()
         req.header.stamp = rospy.Time.now()
         req.header.frame_id = self._config.get("planning", {}).get("frame_id", "map")
-        req.start = list(uav_state[:5])
-        req.goal = list(plan_goal[:5])
+        req.start = [uav_state[0], uav_state[1], uav_state[2],
+                     normalize_yaw(uav_state[3]), 0.0]
+        req.goal = [plan_goal[0], plan_goal[1], plan_goal[2],
+                    normalize_yaw(plan_goal[3]), 0.0]
         req.space_lx = self.space_lx
         req.space_ly = self.space_ly
         req.space_lz = self.space_lz

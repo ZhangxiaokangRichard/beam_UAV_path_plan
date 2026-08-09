@@ -6,6 +6,13 @@
 namespace uav_dynamic {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+
+inline double wrap_angle(double a)
+{
+    while (a >  kPi) a -= 2.0 * kPi;
+    while (a < -kPi) a += 2.0 * kPi;
+    return a;
+}
 }
 
 double horizontalSolve(const std::vector<beam_dubins::PathPoint>& path,
@@ -18,56 +25,57 @@ double horizontalSolve(const std::vector<beam_dubins::PathPoint>& path,
 
     const double v = p.speed_mps;
     const double roll_max = p.bank_angle_max_deg * kPi / 180.0;
+    const double yaw_tol = 1e-3;   // 相邻点 yaw 差阈值（rad），> 此值视为转弯段
 
-    // 1) 前视点：沿路径弧长累计到 lookahead
-    std::size_t idx = path.size() - 1;
-    double acc = 0.0;
-    for (std::size_t i = 1; i < path.size(); ++i) {
-        acc += std::hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
-        if (acc >= p.lookahead_m) { idx = i; break; }
-    }
-    const double dx = path[idx].x - path[0].x;
-    const double dy = path[idx].y - path[0].y;
-    const double desired_yaw = std::atan2(dy, dx);
-
-    // 2) DWA：在期望航向 ± window 采样候选航向
-    //    协调转弯：R = lookahead/|Δψ|，roll = atan2(v², g·R)，限幅 bank_angle_max
-    //    代价 = |候选−期望航向|（主项，保证与期望轨迹误差最小）
-    //          + roll_weight·|roll|（轻微平滑，抑制过度滚转）
-    double best_yaw = desired_yaw;
-    double best_roll = 0.0;
-    double best_cost = 1e18;
-    const int n = p.sample_num;
-    for (int i = -(n / 2); i <= n / 2; ++i) {
-        const double cand = desired_yaw + static_cast<double>(i) *
-                              (2.0 * p.sample_window_rad / static_cast<double>(n - 1));
-        double dyaw = cand - cur_yaw;   // 转向量（决定协调转弯 roll）
-        while (dyaw >  kPi) dyaw -= 2.0 * kPi;
-        while (dyaw < -kPi) dyaw += 2.0 * kPi;
-
-        // 协调转弯律：转弯半径 R = lookahead / |Δψ|（小角度近似，最小转弯半径兜底）
-        double R = (std::abs(dyaw) < 1e-6)
-                       ? 1e6
-                       : p.lookahead_m / std::abs(dyaw);
-        R = std::max(R, p.min_turn_radius_m);
-        double roll = std::atan2(v * v, p.g * R);
-        roll = std::clamp(roll, -roll_max, roll_max);
-
-        // 对期望航向的偏差（wrap）
-        double d_des = cand - desired_yaw;
-        while (d_des >  kPi) d_des -= 2.0 * kPi;
-        while (d_des < -kPi) d_des += 2.0 * kPi;
-
-        const double cost = std::abs(d_des) + p.roll_weight * std::abs(roll);
-        if (cost < best_cost) {
-            best_cost = cost;
-            best_yaw = cand;
-            best_roll = roll;
+    // 1) 找 path 中最后一个转弯段（相邻点 yaw 差 ≠ 0，Dubins 末尾圆弧段）。
+    //    注意：beam_dubins 输出的 path 中 curvature 字段可能恒为 0（未填充），
+    //    因此改用相邻点 yaw 差检测转弯，而非依赖 curvature。
+    int last_turn = -1;
+    for (int i = static_cast<int>(path.size()) - 1; i > 0; --i) {
+        if (std::abs(wrap_angle(path[i].yaw - path[i - 1].yaw)) > yaw_tol) {
+            last_turn = i;
+            break;
         }
     }
+    if (last_turn < 0) {
+        // 无转弯（纯直线 Dubins）→ 沿当前 yaw 巡航
+        roll_out = 0.0;
+        return cur_yaw;
+    }
+    // 2) 入口切点：从最后转弯点向前跳过整个转弯段，
+    //    停在进入圆弧前的切点（直线段末点，其 yaw = 进入圆前的切线航向）
+    int entry = last_turn;
+    while (entry > 0 &&
+           std::abs(wrap_angle(path[entry].yaw - path[entry - 1].yaw)) > yaw_tol) {
+        entry--;
+    }
 
-    roll_out = best_roll;
-    return best_yaw;
+    // 3) 转弯方向 sign（左转+ / 右转-）：切点之后第一个转弯点的 yaw 变化
+    const int next = std::min(entry + 1, static_cast<int>(path.size()) - 1);
+    const double d = wrap_angle(path[next].yaw - path[entry].yaw);
+    const int sign = (d > 0.0) ? +1 : -1;
+
+    // 4) 转弯半径 R：由转弯段弧长 / 转角估计（ds/dψ），兜底 min_turn_radius_m
+    double sum_ds = 0.0, sum_dpsi = 0.0;
+    for (int i = entry + 1; i <= last_turn; ++i) {
+        const double dd = wrap_angle(path[i].yaw - path[i - 1].yaw);
+        sum_dpsi += std::abs(dd);
+        sum_ds += std::hypot(path[i].x - path[i - 1].x,
+                             path[i].y - path[i - 1].y);
+    }
+    double R = (sum_dpsi > 1e-6) ? (sum_ds / sum_dpsi) : p.min_turn_radius_m;
+    R = std::max(R, p.min_turn_radius_m);
+
+    // 5) 目标航向 = 进入该圆前的切线航向指向（入口切点 yaw），
+    //    更新到当前 uav 航向（不对 yaw 限幅，仅归一化）→ 航向快速调整跟上 target
+    double yaw = path[entry].yaw;
+    yaw = wrap_angle(yaw);
+
+    // 6) 协调转弯律滚转：roll = sign·atan2(v², g·R)（左转正/右转负），限幅 ±25°
+    double roll = static_cast<double>(sign) * std::atan2(v * v, p.g * R);
+    roll = std::clamp(roll, -roll_max, roll_max);
+    roll_out = roll;
+    return yaw;
 }
 
 double verticalSolve(double height_err,

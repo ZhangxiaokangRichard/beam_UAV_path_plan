@@ -42,7 +42,8 @@ add_executable(udp_sender src/udp_sender.cpp)
 target_link_libraries(udp_sender ros_udp_bridge_core ${catkin_LIBRARIES})
 add_dependencies(udp_sender ${catkin_EXPORTED_TARGETS})
 
-# udp_mssn_bridge 节点（服务入口：本地 11302 指令 → 启停 launch / 切换拦截模式）
+# udp_mssn_bridge 节点（极简版：距离 < 阈值 → /uav/launch_cmd；crashed → 命中 UDP；
+#                        启动时 tmux 依次拉起 uav_guide.launch 与 uav_bridge.launch）
 add_executable(udp_mssn_bridge src/udp_mssn_bridge.cpp)
 target_link_libraries(udp_mssn_bridge ros_udp_bridge_core ${catkin_LIBRARIES})
 add_dependencies(udp_mssn_bridge ${catkin_EXPORTED_TARGETS})

@@ -1,20 +1,21 @@
 # ═══════════════════════════════════════════════════════════════
-# udp_mssn_bridge 配置：本地 UDP 指令入口 → 服务/引导/拦截模式管理
-# 移植自 ros_mqtt_bridge::mqtt_mssn_bridge，外部通信改为本地 UDP
+# udp_mssn_bridge 配置（极简版）：距离判断发射许可 + 命中上报 + tmux 窗口
 # ═══════════════════════════════════════════════════════════════
 
-cmd:
-  # ── 本地指令接收（外部 → 本节点） ──
-  local_host: 0.0.0.0
-  local_port: 11302
-  recv_buf_size: 1024
-  recv_timeout_ms: 100
+mission:
+  check_hz: 10.0            # 距离判断循环频率（Hz）
+  launch_dist_m: 7000.0     # uav-target 欧氏距离阈值（m）；< 该值允许发射
 
-  # ── 状态回传（本节点 → 外部，可选） ──
-  remote_host: 127.0.0.1
-  remote_port: 11303
-  report_enable: false       # 是否定时 UDP 回传状态 JSON
-  status_poll_hz: 2.0
+cmd:
+  launch_cmd_topic: /uav/launch_cmd   # 发射许可话题（std_msgs/Bool，latch）
+  crashed_topic: /target/crashed      # 命中判定话题（std_msgs/Bool）
+  uav_state_topic: /uav/state         # uav 状态订阅
+  target_state_topic: /target/state   # 目标状态订阅
+
+  # ── 命中协议发送（crashed=true 时发含 target_key 的 JSON-UDP） ──
+  remote_host: 10.119.228.21          # 发送目标（与 udp_sender 一致）
+  remote_port: 9100                   # 发送端口
+  target_key: "30064967681"           # 目标 key（命中协议 targetKey）
 
 mssn:
   # 启动子进程前的 ROS 环境
@@ -22,20 +23,6 @@ mssn:
     source /opt/ros/noetic/setup.bash
     source ~/catkin_ws/devel/setup.bash
 
-  # ── nav 命令：uav_guide.launch 启停 ──
-  launch_package: uav_guide
-  launch_file: uav_guide.launch
-  launch_match: "uav_guide.launch"     # pgrep 匹配，检测是否运行
-
-  # ── guide 命令：可配置辅助进程（默认不启用；guide_point 已移除） ──
-  guide_package: ""                    # 例：ros_udp_bridge
-  guide_executable: ""                 # 例：udp_sender
-  guide_match: ""                      # 例：udp_sender
-
-  log_dir: ~/.ros/udp_mssn_bridge/logs
-
-  launch_startup_timeout_s: 30
-  guide_startup_timeout_s: 15
-
-  # 收到模式切换命令时是否先确保导航服务已启动
-  ensure_nav_on_mode: true
+  # ── tmux 依次启动的两个独立窗口 ──
+  uav_guide_launch: "roslaunch uav_guide uav_guide.launch"   # 主循环
+  uav_bridge_launch: "roslaunch ros_udp_bridge uav_bridge.launch"  # udp_receiver + udp_sender
