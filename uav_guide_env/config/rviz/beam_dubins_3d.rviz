@@ -1,34 +1,26 @@
 Panels:
-  - Class: rviz/Displays
-    Help Height: 70
+  - Class: rviz_common/Displays
+    Help Height: 78
     Name: Displays
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 141
-  - Class: rviz/Views
-    Expanded:
-      - /Current View1
+    Tree Height: 700
+  - Class: rviz_common/Views
+    Expanded: ~
     Name: Views
     Splitter Ratio: 0.5
-  - Class: rviz/Tool Properties
-    Expanded: ~
-    Name: Tool Properties
-    Splitter Ratio: 0.5
-Preferences:
-  PromptSaveOnExit: true
-Toolbars:
-  toolButtonStyle: 2
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.5
+    # ── 地面网格（1.0.1 同款：200 m 单元格，原点 (5000,2500)）──
+    - Class: rviz_default_plugins/Grid
+      Alpha: 0.5
       Cell Size: 200
-      Class: rviz/Grid
       Color: 180; 180; 180
       Enabled: true
       Line Style:
-        Line Width: 0.029999999329447746
+        Line Width: 0.03
         Value: Lines
       Name: Grid
       Normal Cell Count: 1
@@ -38,49 +30,120 @@ Visualization Manager:
         Z: 0
       Plane: XY
       Plane Cell Count: 100
-      Reference Frame: map
+      Reference Frame: <Fixed Frame>
       Value: true
-    - Class: rviz/TF
+
+    # ── TF：map → <uav_sn>（由 mqtt_target_bridge 广播）──
+    - Class: rviz_default_plugins/TF
       Enabled: true
       Filter (blacklist): ""
       Filter (whitelist): ""
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        map:
-          Value: true
-        odom:
-          Value: true
-      Marker Alpha: 1
       Marker Scale: 200
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
-      Tree:
-        map:
-          odom:
-            {}
       Update Interval: 0
       Value: true
-    - Class: rviz/MarkerArray
+
+    # ── 空间边界线框（latched）──
+    - Class: rviz_default_plugins/Marker
       Enabled: true
-      Marker Topic: visualization_marker_array
-      Name: Obstacles
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: visualization_marker
       Name: EnvBounds
-      Namespaces:
-        {}
+      Namespaces: {}
       Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/env_bounds
       Value: true
-    - Angle Tolerance: 0.10000000149011612
-      Class: rviz/Odometry
+
+    # ── UAV 3D 模型（橙色箭头 600 m + 100 m 球）──
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: UAVModel
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/uav_model
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: UAVSphere
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/uav_sphere
+      Value: true
+
+    # ── 目标 3D 模型（红色球 120 m + 箭头 400 m）──
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: TargetModel
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/target_model
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: TargetArrow
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/target_arrow
+      Value: true
+
+    # ── 状态文本 + 规划摘要文本 ──
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: StatusText
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/status
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: PlanText
+      Namespaces: {}
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/plan_text
+      Value: true
+
+    # ── 原始位姿（大尺寸箭头，便于 10 km 尺度观察）──
+    - Class: rviz_default_plugins/Odometry
+      Angle Tolerance: 0.1
       Covariance:
         Orientation:
           Alpha: 0.5
@@ -89,297 +152,194 @@ Visualization Manager:
           Frame: Local
           Offset: 1
           Scale: 1
-          Value: true
+          Value: false
         Position:
-          Alpha: 0.30000001192092896
+          Alpha: 0.3
           Color: 204; 51; 204
           Scale: 1
-          Value: true
-        Value: true
+          Value: false
+        Value: false
       Enabled: true
       Keep: 1
       Name: UAV State
-      Position Tolerance: 0.10000000149011612
+      Position Tolerance: 0.1
       Queue Size: 10
       Shape:
         Alpha: 1
         Axes Length: 1
-        Axes Radius: 0.10000000149011612
+        Axes Radius: 0.1
         Color: 255; 25; 0
-        Head Length: 0.30000001192092896
-        Head Radius: 0.10000000149011612
-        Shaft Length: 1
-        Shaft Radius: 0.05000000074505806
+        Head Length: 100
+        Head Radius: 40
+        Shaft Length: 400
+        Shaft Radius: 15
         Value: Arrow
-      Topic: /uav/state
-      Unreliable: false
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/uav/state
       Value: true
-    - Class: rviz/Marker
+    - Class: rviz_default_plugins/Odometry
+      Angle Tolerance: 0.1
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: false
+        Position:
+          Alpha: 0.3
+          Color: 204; 51; 204
+          Scale: 1
+          Value: false
+        Value: false
       Enabled: true
-      Marker Topic: visualization_marker
-      Name: UAV Arrow
-      Namespaces:
-        {}
+      Keep: 1
+      Name: Target State
+      Position Tolerance: 0.1
       Queue Size: 10
+      Shape:
+        Alpha: 1
+        Axes Length: 1
+        Axes Radius: 0.1
+        Color: 255; 40; 40
+        Head Length: 80
+        Head Radius: 30
+        Shaft Length: 300
+        Shaft Radius: 12
+        Value: Arrow
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/target/state
       Value: true
-    - Class: rviz/Marker
+
+    # ── 航迹 + 规划路径 ──
+    - Class: rviz_default_plugins/Path
+      Alpha: 1
+      Buffer Length: 1
       Enabled: true
-      Marker Topic: visualization_marker
-      Name: UAV Sphere
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Alpha: 0.800000011920929
-      Buffer Length: 10000
-      Class: rviz/Path
-      Color: 148; 112; 219
-      Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 30
+      Head Diameter: 0.3
+      Head Length: 0.2
+      Length: 0.3
+      Line Style:
+        Line Width: 5
+        Value: Lines
       Name: UAV Trail
       Offset:
         X: 0
         Y: 0
         Z: 0
-      Pose Color: 255; 85; 255
+      Pose Color: 255; 170; 0
       Pose Style: None
-      Queue Size: 10
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic: /uav/trail
-      Unreliable: false
+      Radius: 0.03
+      Shaft Diameter: 0.1
+      Shaft Length: 0.1
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/uav_trail
       Value: true
-    - Angle Tolerance: 0.10000000149011612
-      Class: rviz/Odometry
-      Covariance:
-        Orientation:
-          Alpha: 0.5
-          Color: 255; 255; 127
-          Color Style: Unique
-          Frame: Local
-          Offset: 1
-          Scale: 1
-          Value: true
-        Position:
-          Alpha: 0.30000001192092896
-          Color: 204; 51; 204
-          Scale: 1
-          Value: true
-        Value: true
-      Enabled: true
-      Keep: 1
-      Name: Target State
-      Position Tolerance: 0.10000000149011612
-      Queue Size: 10
-      Shape:
-        Alpha: 1
-        Axes Length: 1
-        Axes Radius: 0.10000000149011612
-        Color: 255; 25; 0
-        Head Length: 0.30000001192092896
-        Head Radius: 0.10000000149011612
-        Shaft Length: 1
-        Shaft Radius: 0.05000000074505806
-        Value: Arrow
-      Topic: /target/state
-      Unreliable: false
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: visualization_marker
-      Name: Target Sphere
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: visualization_marker
-      Name: Target Arrow
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Alpha: 0.8999999761581421
+    - Class: rviz_default_plugins/Path
+      Alpha: 1
       Buffer Length: 1
-      Class: rviz/Path
-      Color: 255; 140; 0
       Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 30
+      Head Diameter: 0.3
+      Head Length: 0.2
+      Length: 0.3
+      Line Style:
+        Line Width: 8
+        Value: Lines
       Name: Planned Path
       Offset:
         X: 0
         Y: 0
         Z: 0
-      Pose Color: 255; 85; 255
+      Pose Color: 85; 255; 0
       Pose Style: None
-      Queue Size: 10
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic: /beam_dubins/path
-      Unreliable: false
+      Radius: 0.03
+      Shaft Diameter: 0.1
+      Shaft Length: 0.1
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aoa/viz/planed_path
       Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: visualization_marker
-      Name: Search Tree
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: visualization_marker
-      Name: Status Text
-      Namespaces:
-        {}
-      Queue Size: 10
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /env/bounds
-      Name: Marker
-      Namespaces:
-        env_bounds: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/MarkerArray
-      Enabled: true
-      Marker Topic: /obstacles
-      Name: MarkerArray
-      Namespaces:
-        obstacles: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /target/arrow
-      Name: Target_arrow
-      Namespaces:
-        target_arrow: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /uav/sphere
-      Name: Uav_model
-      Namespaces:
-        uav_sphere: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /uav/model
-      Name: Uav_arrow
-      Namespaces:
-        uav_model: true
-      Queue Size: 100
-      Value: true
-    - Class: rviz/Marker
-      Enabled: true
-      Marker Topic: /target/model
-      Name: Target_model
-      Namespaces:
-        target_model: true
-      Queue Size: 100
-      Value: true
+
   Enabled: true
   Global Options:
-    Background Color: 255; 255; 255
-    Default Light: true
+    Background Color: 48; 48; 48
     Fixed Frame: map
     Frame Rate: 30
   Name: root
   Tools:
-    - Class: rviz/MoveCamera
-    - Class: rviz/Select
-    - Class: rviz/Interact
-      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
-      Class: rviz/Orbit
-      Distance: 23494.17578125
+      Class: rviz_default_plugins/Orbit
+      Distance: 12000
       Enable Stereo Rendering:
-        Stereo Eye Separation: 0.05999999865889549
+        Stereo Eye Separation: 0.06
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
-      Field of View: 0.7853981852531433
       Focal Point:
         X: 5000
         Y: 2500
-        Z: 500
+        Z: 0
       Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05000000074505806
+      Focal Shape Size: 0.05
       Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
-      Target Frame: map
+      Near Clip Distance: 0.01
+      Pitch: 0.6
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
       Yaw: 0
-    Saved:
-      - Class: rviz/Orbit
-        Distance: 10000
-        Enable Stereo Rendering:
-          Stereo Eye Separation: 0.05999999865889549
-          Stereo Focal Distance: 1
-          Swap Stereo Eyes: false
-          Value: false
-        Field of View: 0.7853981852531433
-        Focal Point:
-          X: 5000
-          Y: 2500
-          Z: 500
-        Focal Shape Fixed Size: true
-        Focal Shape Size: 0.05000000074505806
-        Invert Z Axis: false
-        Name: Perspective 3D
-        Near Clip Distance: 0.009999999776482582
-        Pitch: 0.7850000262260437
-        Target Frame: map
-        Yaw: 0.7850000262260437
-      - Class: rviz/ThirdPersonFollower
-        Distance: 600
-        Enable Stereo Rendering:
-          Stereo Eye Separation: 0.05999999865889549
-          Stereo Focal Distance: 1
-          Swap Stereo Eyes: false
-          Value: false
-        Field of View: 0.7853981852531433
-        Focal Point:
-          X: 0
-          Y: 0
-          Z: 0
-        Focal Shape Fixed Size: true
-        Focal Shape Size: 0.05000000074505806
-        Invert Z Axis: false
-        Name: UAV Chase 3D
-        Near Clip Distance: 0.009999999776482582
-        Pitch: 0.7853981852531433
-        Target Frame: uav_base_link
-        Yaw: 0.7853981852531433
+    Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 720
+  Height: 900
   Hide Left Dock: false
-  Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000015800000276fc0200000003fb000000100044006900730070006c006100790073010000003d00000110000000c900fffffffb0000000a005600690065007700730100000153000000de000000a400fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007301000002370000007c0000005c00ffffff000003280000027600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
-  Tool Properties:
-    collapsed: false
-  Views:
-    collapsed: false
-  Width: 1158
-  X: 122
-  Y: 77
+  Hide Right Dock: true
+  Width: 1500
+  X: 60
+  Y: 60

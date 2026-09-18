@@ -1,10 +1,7 @@
 # ── Beam Dubins 路径规划服务 ────────────────────────
 # 算法层对外暴露的唯一接口
 
-std_msgs/Header header
-  uint32 seq
-  time stamp
-  string frame_id            # 参考坐标系（应为 "map"）
+std_msgs/Header header          # 参考坐标系在 frame_id（应为 "map"）；ROS2 Header 无 seq
 
 # ── 规划起点（5D 状态：x, y, z, yaw, pitch）───────
 float64[5] start

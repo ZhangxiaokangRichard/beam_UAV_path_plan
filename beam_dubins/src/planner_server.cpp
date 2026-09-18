@@ -1,276 +1,256 @@
 /**
  * @file planner_server.cpp
- * @brief Beam Dubins 路径规划 ROS Service 封装节点
+ * @brief Beam Dubins 路径规划 ROS2 (Humble) Service 封装节点
  *
- * Phase 2a: 将 Phase 1 的纯 C++ 算法库包装为 ROS Service。
+ * 与 1.0.1 的 ROS1 版本职责一一对应：
+ *   1. 加载参数（同名扁平/点分层级参数）→ BeamConfig
+ *   2. 提供规划服务（2.0 服务名：aoa/beam_dubins/plan_path）
+ *   3. 服务回调：ROS 消息 ↔ C++ 结构体 → beam_dubins::plan_path() → 回填响应
  *
- * 功能：
- *  1. 加载 rosparam 参数（/beam_dubins/ 命名空间）
- *  2. 创建 ServiceServer（/beam_dubins/plan_path）
- *  3. 服务回调中：ROS 消息 ↔ C++ 结构体转换 → 调用 plan_path() → 返回结果
- *
- * 设计要点：
- *  - 服务节点无状态：每次调用独立实例化搜索器
- *  - 参数在启动时加载，运行时不变（Phase 5 可加 dynamic_reconfigure）
- *  - 记录规划耗时并与响应一起返回
+ * 分层约定：算法核心（beam_dubins_core）零 ROS 依赖；**本文件是全包唯一的 ROS 包装层**。
  */
 
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 
-#include <chrono>
+#include <clocale>
+#include <cstdint>
 #include <string>
 #include <vector>
 
-#include "beam_dubins/Obstacle.h"
-#include "beam_dubins/PathPoint.h"
-#include "beam_dubins/PlanPath.h"
 #include "beam_dubins/beam_search.h"
+#include "beam_dubins/msg/obstacle.hpp"
+#include "beam_dubins/msg/path_point.hpp"
+#include "beam_dubins/srv/plan_path.hpp"
 #include "beam_dubins/types.h"
 
+namespace {
+
 // ═══════════════════════════════════════════════════════════════
-// 1. 参数加载
+// 1. 参数读取辅助（YAML 中 int/double 混写都能正确读取）
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * @brief 从 ROS 参数服务器加载 BeamConfig
- *
- * 参数位于 /beam_dubins/ 命名空间下。
- * 使用默认值回退机制：参数缺失时使用 BeamConfig 的构造默认值。
- */
-static beam_dubins::BeamConfig load_config(ros::NodeHandle& nh)
+double param_double(const rclcpp::Node& node, const std::string& name, double fallback)
+{
+    if (!node.has_parameter(name)) return fallback;
+    const auto value = node.get_parameter(name);
+    if (value.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+        return value.as_double();
+    if (value.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+        return static_cast<double>(value.as_int());
+    return fallback;
+}
+
+std::int64_t param_int(const rclcpp::Node& node, const std::string& name, std::int64_t fallback)
+{
+    if (!node.has_parameter(name)) return fallback;
+    const auto value = node.get_parameter(name);
+    if (value.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+        return value.as_int();
+    if (value.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+        return static_cast<std::int64_t>(value.as_double());
+    return fallback;
+}
+
+std::string param_string(const rclcpp::Node& node, const std::string& name,
+                         const std::string& fallback)
+{
+    if (!node.has_parameter(name)) return fallback;
+    const auto value = node.get_parameter(name);
+    if (value.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
+        return value.as_string();
+    return fallback;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 2. 参数 → BeamConfig（参数名与 1.0.1 一致，仅去掉 /beam_dubins 前缀）
+// ═══════════════════════════════════════════════════════════════
+
+beam_dubins::BeamConfig load_config(const rclcpp::Node& node)
 {
     beam_dubins::BeamConfig cfg;
 
-    // 参数位于 /beam_dubins/ 命名空间下，通过传入的 nh 句柄访问
+    // ── 搜索参数 ──
+    cfg.beam_width = static_cast<int>(param_int(node, "beam_width", cfg.beam_width));
+    cfg.beam_width_max = static_cast<int>(param_int(node, "beam_width_max", cfg.beam_width_max));
+    cfg.max_depth = static_cast<int>(param_int(node, "max_depth", cfg.max_depth));
+    cfg.max_extend_length = param_double(node, "max_extend_length", cfg.max_extend_length);
+    cfg.min_extend_length = param_double(node, "min_extend_length", cfg.min_extend_length);
+    cfg.goal_tolerance_xy = param_double(node, "goal_tolerance_xy", cfg.goal_tolerance_xy);
+    cfg.goal_tolerance_z = param_double(node, "goal_tolerance_z", cfg.goal_tolerance_z);
+    cfg.dubins_shot_interval =
+        static_cast<int>(param_int(node, "dubins_shot_interval", cfg.dubins_shot_interval));
+    cfg.min_diversity_separation =
+        param_double(node, "min_diversity_separation", cfg.min_diversity_separation);
 
-    // ── 搜索参数 ─────────────────────────────────────────────
-    nh.param("beam_width",               cfg.beam_width,               cfg.beam_width);
-    nh.param("beam_width_max",           cfg.beam_width_max,           cfg.beam_width_max);
-    nh.param("max_depth",                cfg.max_depth,                cfg.max_depth);
-    nh.param("max_extend_length",        cfg.max_extend_length,        cfg.max_extend_length);
-    nh.param("min_extend_length",        cfg.min_extend_length,        cfg.min_extend_length);
-    nh.param("goal_tolerance_xy",        cfg.goal_tolerance_xy,        cfg.goal_tolerance_xy);
-    nh.param("goal_tolerance_z",         cfg.goal_tolerance_z,         cfg.goal_tolerance_z);
-    nh.param("dubins_shot_interval",    cfg.dubins_shot_interval,    cfg.dubins_shot_interval);
-    nh.param("min_diversity_separation", cfg.min_diversity_separation, cfg.min_diversity_separation);
+    // ── 评分器权重 ──
+    cfg.w_h = param_double(node, "scorer.w_h", cfg.w_h);
+    cfg.w_c = param_double(node, "scorer.w_c", cfg.w_c);
+    cfg.w_p = param_double(node, "scorer.w_p", cfg.w_p);
 
-    // ── 评分器权重（嵌套子命名空间 scorer/）─────────────────
-    nh.param("scorer/w_h", cfg.w_h, cfg.w_h);
-    nh.param("scorer/w_c", cfg.w_c, cfg.w_c);
-    nh.param("scorer/w_p", cfg.w_p, cfg.w_p);
-
-    // ── UAV 运动学约束 ──────────────────────────────────────
-    nh.param("uav/min_turn_radius_m",  cfg.R_min,         cfg.R_min);
-    nh.param("uav/collision_radius_m", cfg.r_body,        cfg.r_body);
-
-    // gamma_max: 从角度(°) → 弧度(rad)
-    double pitch_deg = 5.0;
-    nh.param("uav/max_pitch_angle_deg", pitch_deg, pitch_deg);
+    // ── UAV 运动学约束 ──
+    cfg.R_min = param_double(node, "uav.min_turn_radius_m", cfg.R_min);
+    cfg.r_body = param_double(node, "uav.collision_radius_m", cfg.r_body);
+    const double pitch_deg = param_double(node, "uav.max_pitch_angle_deg", 5.0);
     cfg.gamma_max_rad = pitch_deg * M_PI / 180.0;
 
     return cfg;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 2. 消息转换：ROS msg ↔ C++ 结构体
+// 3. 消息转换：ROS msg ↔ C++ 结构体
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * @brief 将 ROS PlanPath 请求转换为 C++ PlanRequest
- *
- * 提取 start, goal, 空间边界, 障碍物列表等字段。
- * 使用 use_3d 标志位控制 3D 模式（Phase 4+ 启用）。
- */
-static beam_dubins::PlanRequest ros_to_request(
-    const beam_dubins::PlanPath::Request& ros_req)
+beam_dubins::PlanRequest ros_to_request(
+    const beam_dubins::srv::PlanPath::Request& ros_req,
+    const rclcpp::Logger& logger)
 {
     beam_dubins::PlanRequest req;
 
-    // ── 起点（5D 状态数组）───────────────────────────────────
-    if (ros_req.start.size() >= 5) {
-        req.start = {ros_req.start[0], ros_req.start[1], ros_req.start[2],
-                     ros_req.start[3], ros_req.start[4]};
-    } else {
-        ROS_WARN("PlanPath request: start array has < 5 elements, padding zeros");
-        req.start = {0, 0, 0, 0, 0};
-    }
+    // ── 起点 / 终点（5D 定长数组，rosidl 保证长度为 5）──
+    req.start = {ros_req.start[0], ros_req.start[1], ros_req.start[2],
+                 ros_req.start[3], ros_req.start[4]};
+    req.goal = {ros_req.goal[0], ros_req.goal[1], ros_req.goal[2],
+                ros_req.goal[3], ros_req.goal[4]};
 
-    // ── 终点 ─────────────────────────────────────────────────
-    if (ros_req.goal.size() >= 5) {
-        req.goal = {ros_req.goal[0], ros_req.goal[1], ros_req.goal[2],
-                    ros_req.goal[3], ros_req.goal[4]};
-    } else {
-        ROS_WARN("PlanPath request: goal array has < 5 elements, padding zeros");
-        req.goal = {0, 0, 0, 0, 0};
-    }
-
-    // ── 空间边界 ─────────────────────────────────────────────
-    req.space_lx        = ros_req.space_lx;
-    req.space_ly        = ros_req.space_ly;
-    req.space_lz        = ros_req.space_lz;
+    // ── 空间边界与选项 ──
+    req.space_lx = ros_req.space_lx;
+    req.space_ly = ros_req.space_ly;
+    req.space_lz = ros_req.space_lz;
     req.boundary_margin = ros_req.boundary_margin;
-    req.time_limit_ms   = ros_req.time_limit_ms;
-    req.use_3d          = ros_req.use_3d;
+    req.time_limit_ms = ros_req.time_limit_ms;
+    req.use_3d = ros_req.use_3d;
 
-    // ── 障碍物列表 ───────────────────────────────────────────
+    // ── 障碍物列表 ──
     req.obstacles.reserve(ros_req.obstacles.size());
     for (const auto& obs_msg : ros_req.obstacles) {
         beam_dubins::AABB aabb;
-        if (obs_msg.aabb_min.size() >= 3 && obs_msg.aabb_max.size() >= 3) {
-            aabb.min = {obs_msg.aabb_min[0], obs_msg.aabb_min[1], obs_msg.aabb_min[2]};
-            aabb.max = {obs_msg.aabb_max[0], obs_msg.aabb_max[1], obs_msg.aabb_max[2]};
-        }
+        aabb.min = {obs_msg.aabb_min[0], obs_msg.aabb_min[1], obs_msg.aabb_min[2]};
+        aabb.max = {obs_msg.aabb_max[0], obs_msg.aabb_max[1], obs_msg.aabb_max[2]};
         req.obstacles.push_back(aabb);
     }
 
+    if (ros_req.obstacles.empty()) {
+        RCLCPP_DEBUG(logger, "PlanPath request: no obstacles (obstacle-free planning)");
+    }
     return req;
 }
 
-/**
- * @brief 将 C++ PlanResponse 转换为 ROS PlanPath 响应
- *
- * 填充 path、cost、状态消息等字段。
- * PathPoint 消息额外携带 curvature 字段（用于速度自适应）。
- */
-static void response_to_ros(const beam_dubins::PlanResponse& resp,
-                            beam_dubins::PlanPath::Response& ros_resp)
+void response_to_ros(const beam_dubins::PlanResponse& resp,
+                     beam_dubins::srv::PlanPath::Response& ros_resp)
 {
-    ros_resp.success          = resp.success;
-    ros_resp.cost             = resp.cost;
-    ros_resp.nodes_explored   = resp.nodes_explored;
-    ros_resp.depth_reached    = resp.depth_reached;
+    ros_resp.success = resp.success;
+    ros_resp.cost = resp.cost;
+    ros_resp.nodes_explored = resp.nodes_explored;
+    ros_resp.depth_reached = resp.depth_reached;
     ros_resp.planning_time_ms = resp.planning_time_ms;
-    ros_resp.status_message   = resp.status_message;
+    ros_resp.status_message = resp.status_message;
 
-    // ── 路径点序列 ───────────────────────────────────────────
+    ros_resp.path.clear();
     ros_resp.path.reserve(resp.path.size());
     for (const auto& pp : resp.path) {
-        beam_dubins::PathPoint ros_pp;
-        ros_pp.x         = pp.x;
-        ros_pp.y         = pp.y;
-        ros_pp.z         = pp.z;
-        ros_pp.yaw       = pp.yaw;
-        ros_pp.pitch     = pp.pitch;
+        beam_dubins::msg::PathPoint ros_pp;
+        ros_pp.x = pp.x;
+        ros_pp.y = pp.y;
+        ros_pp.z = pp.z;
+        ros_pp.yaw = pp.yaw;
+        ros_pp.pitch = pp.pitch;
         ros_pp.curvature = pp.curvature;
         ros_resp.path.push_back(ros_pp);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 3. 服务回调
+// 4. 服务回调
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * @brief /beam_dubins/plan_path 服务回调
- *
- * 处理流程：
- *  1. 消息反序列化（ROS → C++）
- *  2. 调用 plan_path()（纯 C++ 算法）
- *  3. 结果序列化（C++ → ROS）
- *
- * 该函数为同步阻塞执行，规划期间节点不响应其他服务请求。
- */
-static bool handle_plan_path(
-    beam_dubins::PlanPath::Request&  req,
-    beam_dubins::PlanPath::Response& res,
-    const beam_dubins::BeamConfig&   cfg)
+void handle_plan_path(const std::shared_ptr<beam_dubins::srv::PlanPath::Request> req,
+                      std::shared_ptr<beam_dubins::srv::PlanPath::Response> res,
+                      const beam_dubins::BeamConfig& cfg,
+                      const rclcpp::Logger& logger)
 {
-    // ── 日志：记录请求摘要 ───────────────────────────────────
-    ROS_INFO("[planner_server] planning request received: "
-             "start=(%.0f,%.0f,%.0f, ψ=%.1f°) "
-             "goal=(%.0f,%.0f,%.0f, ψ=%.1f°) "
-             "obstacles=%zu",
-             req.start[0], req.start[1], req.start[2],
-             req.start[3] * 180.0 / M_PI,
-             req.goal[0], req.goal[1], req.goal[2],
-             req.goal[3] * 180.0 / M_PI,
-             req.obstacles.size());
+    RCLCPP_INFO(logger,
+                "[planner_server] planning request received: "
+                "start=(%.0f,%.0f,%.0f, ψ=%.1f°) goal=(%.0f,%.0f,%.0f, ψ=%.1f°) obstacles=%zu",
+                req->start[0], req->start[1], req->start[2], req->start[3] * 180.0 / M_PI,
+                req->goal[0], req->goal[1], req->goal[2], req->goal[3] * 180.0 / M_PI,
+                req->obstacles.size());
 
-    // ── 诊断：打印第一个障碍物 AABB ──────────────────────────
-    for (size_t i = 0; i < req.obstacles.size() && i < 3; ++i) {
-        const auto& o = req.obstacles[i];
-        ROS_INFO("[planner_server]   obstacle#%zu: min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) size=(%.0f×%.0f×%.0f)m",
-                 i,
-                 o.aabb_min[0], o.aabb_min[1], o.aabb_min[2],
-                 o.aabb_max[0], o.aabb_max[1], o.aabb_max[2],
-                 o.aabb_max[0]-o.aabb_min[0],
-                 o.aabb_max[1]-o.aabb_min[1],
-                 o.aabb_max[2]-o.aabb_min[2]);
+    for (std::size_t i = 0; i < req->obstacles.size() && i < 3; ++i) {
+        const auto& o = req->obstacles[i];
+        RCLCPP_INFO(logger,
+                    "[planner_server]   obstacle#%zu: min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) "
+                    "size=(%.0f×%.0f×%.0f)m",
+                    i,
+                    o.aabb_min[0], o.aabb_min[1], o.aabb_min[2],
+                    o.aabb_max[0], o.aabb_max[1], o.aabb_max[2],
+                    o.aabb_max[0] - o.aabb_min[0],
+                    o.aabb_max[1] - o.aabb_min[1],
+                    o.aabb_max[2] - o.aabb_min[2]);
     }
 
-    // ── 1. 消息 → C++ 结构体 ─────────────────────────────────
-    auto plan_req = ros_to_request(req);
+    const auto plan_req = ros_to_request(*req, logger);
+    const auto plan_resp = beam_dubins::plan_path(plan_req, cfg);
+    response_to_ros(plan_resp, *res);
 
-    // ── 2. 调用核心算法 ──────────────────────────────────────
-    auto plan_resp = beam_dubins::plan_path(plan_req, cfg);
-
-    // ── 3. C++ 结构体 → 消息 ─────────────────────────────────
-    response_to_ros(plan_resp, res);
-
-    // ── 日志：记录响应摘要 ───────────────────────────────────
     if (plan_resp.success) {
-        ROS_INFO("[planner_server] planning succeeded: cost=%.1fm, "
-                 "path_points=%zu, nodes=%d, depth=%d, time=%.1fms",
-                 plan_resp.cost, plan_resp.path.size(),
-                 plan_resp.nodes_explored, plan_resp.depth_reached,
-                 plan_resp.planning_time_ms);
+        RCLCPP_INFO(logger,
+                    "[planner_server] planning succeeded: cost=%.1fm, path_points=%zu, "
+                    "nodes=%d, depth=%d, time=%.1fms",
+                    plan_resp.cost, plan_resp.path.size(), plan_resp.nodes_explored,
+                    plan_resp.depth_reached, plan_resp.planning_time_ms);
     } else {
-        ROS_WARN("[planner_server] planning failed: %s, "
-                 "nodes=%d, depth=%d, time=%.1fms",
-                 plan_resp.status_message.c_str(),
-                 plan_resp.nodes_explored, plan_resp.depth_reached,
-                 plan_resp.planning_time_ms);
+        RCLCPP_WARN(logger,
+                    "[planner_server] planning failed: %s, nodes=%d, depth=%d, time=%.1fms",
+                    plan_resp.status_message.c_str(), plan_resp.nodes_explored,
+                    plan_resp.depth_reached, plan_resp.planning_time_ms);
     }
-
-    return true;  // 始终返回 true（Service 语义：成功响应）
 }
 
+}  // namespace
+
 // ═══════════════════════════════════════════════════════════════
-// 4. 主函数
+// 5. 主函数
 // ═══════════════════════════════════════════════════════════════
 
 int main(int argc, char** argv)
-{   
-    // 中文支持
-    setlocale(LC_ALL, "");  // 设置系统区域为默认环境
-    // ── ROS 初始化 ────────────────────────────────────────────
-    ros::init(argc, argv, "planner_server");
-    ros::NodeHandle nh;
-    ros::NodeHandle pnh("~");
+{
+    std::setlocale(LC_ALL, "");  // 中文日志
 
-    // ── 加载参数配置 ──────────────────────────────────────────
-    // 参数在 /beam_dubins/ 命名空间下
-    // launch 文件中通过 <rosparam ns="beam_dubins"> 加载
-    ros::NodeHandle beam_nh("beam_dubins");  // 全局命名空间
-    beam_dubins::BeamConfig cfg = load_config(beam_nh);
+    rclcpp::init(argc, argv);
 
-    ROS_INFO("[planner_server] configuration loaded:");
-    ROS_INFO("  beam_width=%d, beam_width_max=%d, max_depth=%d",
-             cfg.beam_width, cfg.beam_width_max, cfg.max_depth);
-    ROS_INFO("  max_extend=%.1fm, min_extend=%.1fm",
-             cfg.max_extend_length, cfg.min_extend_length);
-    ROS_INFO("  goal_tolerance: xy=%.1fm, z=%.1fm",
-             cfg.goal_tolerance_xy, cfg.goal_tolerance_z);
-    ROS_INFO("  R_min=%.1fm, gamma_max=%.1f°, r_body=%.1fm",
-             cfg.R_min, cfg.gamma_max_rad * 180.0 / M_PI, cfg.r_body);
-    ROS_INFO("  scorer: w_h=%.2f, w_c=%.2f, w_p=%.2f",
-             cfg.w_h, cfg.w_c, cfg.w_p);
+    // 允许 YAML 中的参数键自动声明（无需逐个 declare_parameter）
+    rclcpp::NodeOptions options;
+    options.automatically_declare_parameters_from_overrides(true);
+    auto node = std::make_shared<rclcpp::Node>("planner_server", options);
 
-    // ── 创建 ServiceServer ────────────────────────────────────
-    // 使用 lambda 捕获 cfg（只读配置，线程安全）
-    ros::ServiceServer service = nh.advertiseService<beam_dubins::PlanPath::Request,
-                                                      beam_dubins::PlanPath::Response>(
-        "/beam_dubins/plan_path",
-        [&cfg](beam_dubins::PlanPath::Request&  req,
-               beam_dubins::PlanPath::Response& res) -> bool {
-            return handle_plan_path(req, res, cfg);
+    const beam_dubins::BeamConfig cfg = load_config(*node);
+    const std::string service_name =
+        param_string(*node, "service_name", "aoa/beam_dubins/plan_path");
+
+    RCLCPP_INFO(node->get_logger(), "[planner_server] configuration loaded:");
+    RCLCPP_INFO(node->get_logger(), "  beam_width=%d, beam_width_max=%d, max_depth=%d",
+                cfg.beam_width, cfg.beam_width_max, cfg.max_depth);
+    RCLCPP_INFO(node->get_logger(), "  max_extend=%.1fm, min_extend=%.1fm",
+                cfg.max_extend_length, cfg.min_extend_length);
+    RCLCPP_INFO(node->get_logger(), "  goal_tolerance: xy=%.1fm, z=%.1fm",
+                cfg.goal_tolerance_xy, cfg.goal_tolerance_z);
+    RCLCPP_INFO(node->get_logger(), "  R_min=%.1fm, gamma_max=%.1f°, r_body=%.1fm",
+                cfg.R_min, cfg.gamma_max_rad * 180.0 / M_PI, cfg.r_body);
+    RCLCPP_INFO(node->get_logger(), "  scorer: w_h=%.2f, w_c=%.2f, w_p=%.2f",
+                cfg.w_h, cfg.w_c, cfg.w_p);
+
+    const rclcpp::Logger logger = node->get_logger();
+    auto service = node->create_service<beam_dubins::srv::PlanPath>(
+        service_name,
+        [cfg, logger](std::shared_ptr<beam_dubins::srv::PlanPath::Request> req,
+                      std::shared_ptr<beam_dubins::srv::PlanPath::Response> res) {
+            handle_plan_path(req, res, cfg, logger);
         });
 
-    ROS_INFO("[planner_server] service ready: /beam_dubins/plan_path");
-    ROS_INFO("[planner_server] waiting for planning requests...");
+    RCLCPP_INFO(node->get_logger(), "[planner_server] service ready: %s", service_name.c_str());
+    RCLCPP_INFO(node->get_logger(), "[planner_server] waiting for planning requests...");
 
-    // ── 事件循环 ──────────────────────────────────────────────
-    ros::spin();
-
+    rclcpp::spin(node);
+    rclcpp::shutdown();
     return 0;
 }

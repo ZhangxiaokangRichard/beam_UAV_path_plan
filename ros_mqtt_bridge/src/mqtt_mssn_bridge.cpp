@@ -1,652 +1,543 @@
 /**
  * @file mqtt_mssn_bridge.cpp
- * @brief 导航任务远程控制桥：MQTT 命令 → ROS 进程/话题管理，状态回报。
+ * @brief 任务/模式桥（P6）——ROS2 版等价物，取代 1.0.1 的 mqtt_mssn_bridge
  *
- * 融合原 guide_mqtt_bridge（Python）能力到 ros_mqtt_bridge：
- *   - 订阅 aoa/ai_guide/ 命令话题，管理 uav_guide.launch 与 mqtt_waypoint_bridge
- *     进程的启停（有 DISPLAY 时 xterm 弹窗，无窗口环境用 tmux 会话）。
- *   - 通过 ROS Publisher 直接切换拦截模式（等效 rostopic pub -1）。
- *   - 订阅 /uav_guide/intercept_mode、读取 /uav_guide/tracking_mode；
- *     订阅 /uav/state、/target/state、/uav/planned_path 上报状态与路径。
- *   - 以 status_poll_hz（默认 2Hz）发布 aoa/ai_guide/ 状态话题（JSON）。
+ * 职责（Q8 裁决）：模式与启停的**唯一** MQTT 入口，决定
+ *   1) `uav_guide_launch.py`（导航栈：planner + 3 个 guide 节点）的启动与停止
+ *   2) `mqtt_control_bridge`（出站控制节点）的启动与停止
+ *
+ * 入站（MQTT → 本节点）：
+ *   `aoa/ai_guide/set_cruise_mode`  {"mode":"auto|setpoint|cruise"}  → 转 ROS 镜像 `aoa/uav/set_cruise_mode`
+ *   `aoa/ai_guide/nav/cmd`          {"start":<bool>}                → 启停导航栈
+ *   `aoa/ai_guide/guide/cmd`        {"start":<bool>}                → 启停控制桥
+ * 出站（本节点 → MQTT）：
+ *   `aoa/ai_guide/nav/status`       {"running":<bool>}
+ *   `aoa/ai_guide/guide/status`     {"running":<bool>,"mode":"...","tracking":<bool>}
+ *
+ * 进程管理：fork + setsid + `/bin/bash -c "<setup> && exec <cmd>"`，日志落盘；
+ * 停止：killpg(SIGTERM) → 超时 SIGKILL → `pkill -f <pattern>` 兜底。
+ * 安全：`mssn.enable_process_control=false` 时只做模式转发，不启停任何进程（离线测试用）。
  */
 
-#include <ros/ros.h>
-#include <std_msgs/String.h>
-#include <nav_msgs/Odometry.h>
-#include <uav_guide/UavPlannedPath.h>
-
-#include <array>
-#include <atomic>
+#include <algorithm>
 #include <cctype>
-#include <condition_variable>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <mutex>
-#include <queue>
+#include <ctime>
+#include <dirent.h>
+#include <fstream>
+#include <memory>
+#include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 
+#include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
+
 #include "ros_mqtt_bridge/json_codec.h"
+#include "ros_mqtt_bridge/mode_gate.h"
 #include "ros_mqtt_bridge/mqtt_client.h"
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// 基础工具
-// ---------------------------------------------------------------------------
-
-std::string trim(const std::string& s)
+// ── 参数助手 ──
+std::string param_string(const rclcpp::Node& node, const std::string& name,
+                         const std::string& fallback)
 {
-    const char* ws = " \t\r\n";
-    const size_t b = s.find_first_not_of(ws);
-    if (b == std::string::npos) return "";
-    const size_t e = s.find_last_not_of(ws);
-    return s.substr(b, e - b + 1);
+    if (!node.has_parameter(name)) return fallback;
+    const auto v = node.get_parameter(name);
+    if (v.get_type() == rclcpp::ParameterType::PARAMETER_STRING) return v.as_string();
+    return fallback;
 }
 
-std::string toLower(std::string s)
+std::int64_t param_int(const rclcpp::Node& node, const std::string& name, std::int64_t fallback)
 {
-    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
+    if (!node.has_parameter(name)) return fallback;
+    const auto v = node.get_parameter(name);
+    if (v.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) return v.as_int();
+    return fallback;
 }
 
-std::string normalizeMode(const std::string& payload)
+double param_double(const rclcpp::Node& node, const std::string& name, double fallback)
 {
-    const std::string t = toLower(trim(payload));
-    if (t == "head-on" || t == "headon" || t == "head_on") return "head-on";
-    if (t == "tail") return "tail";
-    return "";
+    if (!node.has_parameter(name)) return fallback;
+    const auto v = node.get_parameter(name);
+    if (v.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) return v.as_double();
+    if (v.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER)
+        return static_cast<double>(v.as_int());
+    return fallback;
 }
 
-std::string expandHome(const std::string& path)
+bool param_bool(const rclcpp::Node& node, const std::string& name, bool fallback)
 {
-    if (path.rfind("~/", 0) == 0) {
-        const char* home = std::getenv("HOME");
-        if (home) return std::string(home) + path.substr(1);
+    if (!node.has_parameter(name)) return fallback;
+    const auto v = node.get_parameter(name);
+    if (v.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) return v.as_bool();
+    return fallback;
+}
+
+/// 容错提取模式：{"mode":...} 或 {"data":{"mode":...}}
+std::string extractModeTolerant(const std::string& payload)
+{
+    std::string err;
+    std::string mode;
+    if (ros_mqtt_bridge::decodeStateString(payload, "mode", mode, err) && !mode.empty()) return mode;
+    // 退化路径：手工查找第二层
+    const auto key = payload.find("\"mode\"");
+    if (key == std::string::npos) return {};
+    const auto colon = payload.find(':', key);
+    if (colon == std::string::npos) return {};
+    const auto q1 = payload.find('"', colon);
+    if (q1 == std::string::npos) return {};
+    const auto q2 = payload.find('"', q1 + 1);
+    if (q2 == std::string::npos) return {};
+    return payload.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// ── /proc 进程扫描（不依赖 shell，避免 pgrep/pkill 自我匹配）────────────
+
+/// 读取 /proc/<pid>/cmdline（NUL 替换为空格）
+bool readCmdline(int pid, std::string& out)
+{
+    std::ifstream f("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    if (!f) return false;
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (raw.empty()) return false;
+    for (auto& c : raw) {
+        if (c == '\0') c = ' ';
     }
-    return path;
+    out = raw;
+    return true;
 }
 
-// ---------------------------------------------------------------------------
-// 进程管理
-// ---------------------------------------------------------------------------
-
-/// 将首字符括号化（如 uav_guide.launch → [u]av_guide.launch），
-/// 避免 pgrep/pkill -f 匹配到自身 sh -c 调用进程的 cmdline（自匹配）。
-std::string bracketFirst(const std::string& pattern)
+/// 读取 /proc/<pid>/stat 的 pgrp(第5字段) 与 session(第6字段)
+bool readPgrpSession(int pid, int& pgrp, int& session)
 {
-    if (pattern.empty()) return pattern;
-    return "[" + pattern.substr(0, 1) + "]" + pattern.substr(1);
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    if (!f) return false;
+    std::string line;
+    std::getline(f, line);
+    const auto rp = line.rfind(')');   // comm 可能含空格/括号
+    if (rp == std::string::npos) return false;
+    std::istringstream ss(line.substr(rp + 1));
+    std::string state;
+    long ppid = 0, pg = 0, sid = 0;
+    ss >> state >> ppid >> pg >> sid;
+    pgrp = static_cast<int>(pg);
+    session = static_cast<int>(sid);
+    return true;
 }
 
-/// 按命令行模式匹配进程是否存在（对应原 Python 的 pgrep）。
-bool pgrep(const std::string& pattern)
+/// 进程是否存活（僵尸进程视为已退出）
+bool processAlive(int pid)
 {
-    const std::string cmd = "pgrep -f '" + bracketFirst(pattern) + "' >/dev/null 2>&1";
-    const int rc = std::system(cmd.c_str());
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+    if (pid <= 0) return false;
+    if (::kill(pid, 0) != 0) return false;
+    std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+    if (!f) return false;
+    std::string line;
+    std::getline(f, line);
+    const auto rp = line.rfind(')');
+    if (rp == std::string::npos || rp + 2 >= line.size()) return true;
+    return line[rp + 2] != 'Z';
 }
 
-/// 按命令行模式强杀残留进程（兜底，避免孤儿节点）。
-void pkillMatch(const std::string& pattern)
+/**
+ * 扫描 /proc，返回 cmdline 包含 pattern 的进程 pid。
+ * **排除自身、同进程组、同会话的进程**：本节点的命令行可能因参数覆盖而含有被管理
+ * 进程的名字（例如 `-p mssn.guide_run_command:="... mqtt_control_bridge"`），
+ * 若不排除会自我匹配（误判 running）甚至自杀（pkill 命中自身）。
+ * 由 setsid() 启动的子进程位于独立会话，因此仍能被正确发现。
+ */
+std::vector<int> matchPids(const std::string& pattern)
 {
-    const std::string cmd = "pkill -f '" + bracketFirst(pattern) + "' >/dev/null 2>&1 || true";
-    std::system(cmd.c_str());
-}
-
-/// fork + setsid 分离启动子进程，stdout/stderr 追加到 log_file。返回子进程 PID。
-pid_t runDetached(const std::string& shell_cmd, const std::string& log_file)
-{
-    const pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        setsid();  // 新会话，便于 killpg 整组停止
-        const int fd = open(log_file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        execl("/bin/bash", "bash", "-c", shell_cmd.c_str(), static_cast<char*>(nullptr));
-        _exit(127);
+    std::vector<int> out;
+    if (pattern.empty()) return out;
+    DIR* dir = ::opendir("/proc");
+    if (dir == nullptr) return out;
+    const int self = static_cast<int>(::getpid());
+    const int self_pgrp = static_cast<int>(::getpgrp());
+    const int self_sid = static_cast<int>(::getsid(0));
+    while (dirent* ent = ::readdir(dir)) {
+        const char* name = ent->d_name;
+        if (!std::isdigit(static_cast<unsigned char>(name[0]))) continue;
+        const int pid = std::atoi(name);
+        if (pid == self) continue;
+        int pgrp = 0, sid = 0;
+        if (readPgrpSession(pid, pgrp, sid) && (pgrp == self_pgrp || sid == self_sid)) continue;
+        std::string cmd;
+        if (!readCmdline(pid, cmd)) continue;
+        if (cmd.find(pattern) != std::string::npos) out.push_back(pid);
     }
-    return pid;
-}
-
-// ---------------------------------------------------------------------------
-// tmux（无头环境的多进程启动 / 查看 / 停止）
-// ---------------------------------------------------------------------------
-
-/// tmux 是否可用（未安装时回退为后台日志方式）。
-bool tmuxAvailable()
-{
-    const int rc = std::system("command -v tmux >/dev/null 2>&1");
-    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
-}
-
-/// 将多行命令折叠为单行（供 bash -c 在 tmux 内使用）。
-std::string collapseToLine(const std::string& s)
-{
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) out += (c == '\n') ? ';' : c;
+    ::closedir(dir);
     return out;
-}
-
-/// tmux 会话名不允许 '.' 与 ':'，统一替换为 '_'。
-std::string sanitizeSessionName(const std::string& s)
-{
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) out += (c == '.' || c == ':') ? '_' : c;
-    return out;
-}
-
-/// 停止 tmux 会话（整棵进程树一并结束）。
-void tmuxKillSession(const std::string& session)
-{
-    const std::string cmd = "tmux kill-session -t '" + session + "' >/dev/null 2>&1 || true";
-    std::system(cmd.c_str());
-}
-
-/// 新建分离的 tmux 会话运行命令；可 tmux attach -t <session> 查看输出。
-void tmuxNewSession(const std::string& session, const std::string& shell_cmd)
-{
-    tmuxKillSession(session);  // 清理可能残留的同名会话，避免 duplicate session
-    const std::string line = collapseToLine(shell_cmd);
-    const std::string cmd = "tmux new-session -d -s '" + session + "' \"bash -lc '" +
-                            line + "'\" >/dev/null 2>&1";
-    std::system(cmd.c_str());
-}
-
-/// 打开终端运行命令（用户可实时观察 launch / rosrun 输出）。
-/// 有 DISPLAY 时用 xterm；无 DISPLAY（无窗口）时用 tmux 会话（可 attach 查看）；
-/// tmux 不可用时回退为后台日志方式。
-/// @param session_out 输出 tmux 会话名（仅 tmux 路径），否则置空。
-/// @return >0 = 进程 PID（xterm / 后台日志）；0 = 已通过 tmux 会话启动（无 PID 可跟踪）。
-pid_t launchInTerminal(const std::string& title, const std::string& shell_cmd,
-                       const std::string& log_file, std::string& session_out)
-{
-    session_out.clear();
-    const char* display = std::getenv("DISPLAY");
-    if (display && display[0] != '\0') {
-        const pid_t pid = fork();
-        if (pid < 0) return -1;
-        if (pid == 0) {
-            setsid();
-            // -hold：进程退出后保留窗口，便于查看启动错误；停止时由进程组信号一并关闭
-            execlp("xterm", "xterm", "-hold", "-T", title.c_str(),
-                   "-geometry", "140x36", "-e", "bash", "-c", shell_cmd.c_str(),
-                   static_cast<char*>(nullptr));
-            _exit(127);
-        }
-        return pid;
-    }
-    // 无窗口环境：优先 tmux 会话（分离、可 attach / capture-pane 查看输出）
-    if (tmuxAvailable()) {
-        session_out = sanitizeSessionName(title);
-        tmuxNewSession(session_out, shell_cmd);
-        ROS_INFO("[mqtt_mssn_bridge] 无 DISPLAY，以 tmux 会话 '%s' 启动"
-                 "（查看: tmux attach -t %s）", session_out.c_str(), session_out.c_str());
-        return 0;
-    }
-    ROS_WARN("[mqtt_mssn_bridge] 无 DISPLAY 且无 tmux，回退为后台日志方式启动 %s",
-             title.c_str());
-    return runDetached(shell_cmd, log_file);
-}
-
-/// 拼接启动命令：去除 setup_shell 首尾空白（YAML 块标量自带尾随换行，
-/// 直接拼 " && exec" 会产生 "行首 &&" 的 bash 语法错误）。
-std::string buildLaunchCmd(const std::string& setup_shell, const std::string& exec_part)
-{
-    const std::string shell = trim(setup_shell);
-    if (shell.empty()) return exec_part;
-    return shell + " && " + exec_part;
-}
-
-/// 停止某进程组：先 SIGTERM 优雅退出，超时后 SIGKILL。
-void stopProcessGroup(pid_t pid)
-{
-    if (pid <= 0) return;
-    if (kill(-pid, SIGTERM) != 0) return;
-    for (int i = 0; i < 30; ++i) {  // 最多等 3s
-        if (kill(pid, 0) != 0) return;
-        usleep(100000);
-    }
-    kill(-pid, SIGKILL);
 }
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// 配置
-// ---------------------------------------------------------------------------
+namespace {
 
-struct Config {
-    std::string host;
-    int port = 1883;
-    int qos = 0;
-    int keepalive_s = 30;
+/// 单个受管进程
+class ManagedProcess {
+public:
+    void configure(std::string name, std::string command, std::string pattern, std::string log_path,
+                   std::string setup_shell, std::string workspace_dir, double stop_timeout_s)
+    {
+        name_ = std::move(name);
+        command_ = std::move(command);
+        pattern_ = std::move(pattern);
+        log_path_ = std::move(log_path);
+        setup_shell_ = std::move(setup_shell);
+        workspace_dir_ = std::move(workspace_dir);
+        stop_timeout_s_ = stop_timeout_s;
+    }
 
-    std::string nav_cmd_topic;
-    std::string guide_cmd_topic;
-    std::string mode_cmd_topic;
-    std::string nav_status_topic;
-    std::string guide_status_topic;
-    std::string planedpath_topic;
+    bool start(rclcpp::Logger logger)
+    {
+        if (processAlive(pid_)) {
+            RCLCPP_INFO(logger, "[%s] already running (tracked pid=%d), skip start", name_.c_str(),
+                        pid_);
+            return true;
+        }
+        pid_ = -1;   // 已退出但未回收 → 清空并交给下面的 /proc 扫描
+        const auto leftovers = matchPids(pattern_);
+        if (!leftovers.empty()) {
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < leftovers.size() && i < 5; ++i)
+                oss << (i ? "," : "") << leftovers[i];
+            RCLCPP_WARN(logger,
+                        "[%s] %zu untracked instance(s) already running (pids=%s), skip start",
+                        name_.c_str(), leftovers.size(), oss.str().c_str());
+            return true;
+        }
+        const std::string full = "cd " + workspace_dir_ + " && " + setup_shell_ + " && exec " + command_;
 
-    std::string setup_shell;
-    std::string launch_pkg;
-    std::string launch_file;
-    std::string launch_match;
-    std::string waypoint_match;
-    std::string log_dir;
-    int launch_timeout_s = 30;
-    int waypoint_timeout_s = 15;
-    double status_hz = 2.0;
-    bool ensure_nav_on_mode = true;
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            RCLCPP_ERROR(logger, "[%s] fork failed: %s", name_.c_str(), std::strerror(errno));
+            return false;
+        }
+        if (pid == 0) {
+            // 子进程：独立会话，避免被父进程的 Ctrl-C 连带杀死
+            ::setsid();
+            if (!log_path_.empty()) {
+                if (::freopen(log_path_.c_str(), "a", stdout) == nullptr) { /* 日志失败不致命 */ }
+                if (::freopen(log_path_.c_str(), "a", stderr) == nullptr) { /* 同上 */ }
+            }
+            ::execl("/bin/bash", "bash", "-c", full.c_str(), static_cast<char*>(nullptr));
+            ::_exit(127);
+        }
+        pid_ = pid;
+        RCLCPP_INFO(logger, "[%s] started pid=%d cmd='%s' log=%s", name_.c_str(), pid_,
+                    command_.c_str(), log_path_.c_str());
+        return true;
+    }
+
+    bool stop(rclcpp::Logger logger)
+    {
+        bool did_something = false;
+
+        // 1) 已跟踪的子进程：先对整个进程组 SIGTERM，超时再 SIGKILL
+        if (pid_ > 0) {
+            did_something = true;
+            RCLCPP_INFO(logger, "[%s] stopping pgid=%d ...", name_.c_str(), pid_);
+            ::killpg(pid_, SIGTERM);
+
+            // 关键：一边回收组长（否则 killpg(pid,0) 对僵尸组长恒为成功，
+            //      会导致每次都误走 SIGKILL 分支），一边等进程组清空
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(static_cast<int>(stop_timeout_s_ * 1000));
+            int status = 0;
+            bool leader_reaped = false;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!leader_reaped && ::waitpid(pid_, &status, WNOHANG) == pid_) leader_reaped = true;
+                if (leader_reaped && ::killpg(pid_, 0) != 0) break;   // 组内已无成员
+                ::usleep(100 * 1000);
+            }
+            if (::killpg(pid_, 0) == 0) {
+                RCLCPP_WARN(logger, "[%s] SIGTERM timeout (%.0fs) → SIGKILL", name_.c_str(),
+                            stop_timeout_s_);
+                ::killpg(pid_, SIGKILL);
+            }
+            // 清僵尸
+            for (int i = 0; i < 20; ++i) {
+                if (!leader_reaped && ::waitpid(pid_, &status, WNOHANG) == pid_) leader_reaped = true;
+                if (leader_reaped) break;
+                ::usleep(50 * 1000);
+            }
+            RCLCPP_INFO(logger, "[%s] group cleared", name_.c_str());
+            pid_ = -1;
+        }
+
+        // 2) 扫除遗留实例（脱离进程组的子进程 / 上一轮桥未清理干净）
+        //    ⚠ matchPids 已排除自身、同进程组、同会话，不会误杀本节点或调用终端
+        auto leftovers = matchPids(pattern_);
+        if (!leftovers.empty()) {
+            did_something = true;
+            for (int p : leftovers) {
+                ::kill(p, SIGTERM);
+                ::killpg(p, SIGTERM);   // 组内其它成员（p 通常不是组长，失败无妨）
+            }
+            ::usleep(1000 * 1000);
+            int forced = 0;
+            for (int p : leftovers) {
+                if (::kill(p, 0) == 0) {
+                    ::kill(p, SIGKILL);
+                    ++forced;
+                }
+            }
+            if (forced > 0) RCLCPP_WARN(logger, "[%s] force-killed %d leftover process(es)",
+                                        name_.c_str(), forced);
+        }
+
+        RCLCPP_INFO(logger, "[%s] stopped (acted=%d)", name_.c_str(), static_cast<int>(did_something));
+        return true;
+    }
+
+    bool running(rclcpp::Logger logger) const
+    {
+        (void)logger;
+        if (processAlive(pid_)) return true;
+        return !matchPids(pattern_).empty();
+    }
+
+    int pid() const { return pid_; }
+
+private:
+    std::string name_, command_, pattern_, log_path_, setup_shell_, workspace_dir_;
+    double stop_timeout_s_ = 5.0;
+    pid_t pid_ = -1;
 };
 
-Config loadConfig(ros::NodeHandle& nh)
-{
-    Config c;
-    nh.param("mqtt/host", c.host, std::string("192.168.70.62"));
-    nh.param("mqtt/port", c.port, 1883);
-    nh.param("mqtt/qos", c.qos, 0);
-    nh.param("mqtt/keepalive_s", c.keepalive_s, 30);
+// ─────────────────────────────────────────────────────────────
 
-    nh.param("mqtt/nav_cmd_topic", c.nav_cmd_topic, std::string("aoa/ai_guide/nav/cmd"));
-    nh.param("mqtt/guide_cmd_topic", c.guide_cmd_topic, std::string("aoa/ai_guide/guide/cmd"));
-    nh.param("mqtt/mode_cmd_topic", c.mode_cmd_topic, std::string("aoa/ai_guide/guide/mode_cmd"));
-    nh.param("mqtt/nav_status_topic", c.nav_status_topic, std::string("aoa/ai_guide/nav/status"));
-    nh.param("mqtt/guide_status_topic", c.guide_status_topic, std::string("aoa/ai_guide/guide/status"));
-    nh.param("mqtt/planedpath_topic", c.planedpath_topic,
-             std::string("aoa/ai_guide/guide/planedpath"));
-
-    nh.param("mssn/setup_shell", c.setup_shell,
-             std::string("source /opt/ros/noetic/setup.bash\n"
-                         "source ~/catkin_ws/devel/setup.bash"));
-    nh.param("mssn/launch_package", c.launch_pkg, std::string("uav_guide"));
-    nh.param("mssn/launch_file", c.launch_file, std::string("uav_guide.launch"));
-    nh.param("mssn/launch_match", c.launch_match, std::string("uav_guide.launch"));
-    nh.param("mssn/waypoint_match", c.waypoint_match, std::string("mqtt_waypoint_bridge"));
-    nh.param("mssn/log_dir", c.log_dir, std::string("~/.ros/mqtt_mssn_bridge/logs"));
-    nh.param("mssn/launch_startup_timeout_s", c.launch_timeout_s, 30);
-    nh.param("mssn/waypoint_startup_timeout_s", c.waypoint_timeout_s, 15);
-    nh.param("mssn/status_poll_hz", c.status_hz, 2.0);
-    nh.param("mssn/ensure_nav_on_mode", c.ensure_nav_on_mode, true);
-
-    c.log_dir = expandHome(c.log_dir);
-    return c;
-}
-
-// ---------------------------------------------------------------------------
-// 节点主体
-// ---------------------------------------------------------------------------
-
-class MssnBridge {
+class MssnBridge : public rclcpp::Node {
 public:
-    MssnBridge(ros::NodeHandle& nh, const Config& cfg)
-        : nh_(nh), cfg_(cfg)
+    MssnBridge()
+        : rclcpp::Node("mqtt_mssn_bridge",
+                       rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true))
     {
-        const std::string mkdir = "mkdir -p '" + cfg_.log_dir + "' >/dev/null 2>&1 || true";
-        std::system(mkdir.c_str());
+        const std::string host = param_string(*this, "mqtt.host", "192.168.70.62");
+        const int port = static_cast<int>(param_int(*this, "mqtt.port", 1883));
+        const int qos = static_cast<int>(param_int(*this, "mqtt.qos", 0));
+        const int keepalive = static_cast<int>(param_int(*this, "mqtt.keepalive_s", 30));
 
-        // ROS 侧：订阅拦截模式状态、发布模式切换命令
-        mode_sub_ = nh_.subscribe("/uav_guide/intercept_mode", 1,
-                                  &MssnBridge::onInterceptMode, this);
-        mode_cmd_pub_ = nh_.advertise<std_msgs::String>("/uav_guide/intercept_mode_cmd", 1);
+        const std::string mode_cmd_topic =
+            param_string(*this, "mqtt.mode_cmd_topic", "aoa/ai_guide/set_cruise_mode");
+        const std::string nav_cmd_topic =
+            param_string(*this, "mqtt.nav_cmd_topic", "aoa/ai_guide/nav/cmd");
+        const std::string guide_cmd_topic =
+            param_string(*this, "mqtt.guide_cmd_topic", "aoa/ai_guide/guide/cmd");
+        nav_status_topic_ = param_string(*this, "mqtt.nav_status_topic", "aoa/ai_guide/nav/status");
+        guide_status_topic_ =
+            param_string(*this, "mqtt.guide_status_topic", "aoa/ai_guide/guide/status");
 
-        // ROS 侧：订阅本机/目标位姿与规划路径，用于状态与路径上报
-        uav_sub_ = nh_.subscribe("/uav/state", 1, &MssnBridge::onUavState, this);
-        target_sub_ = nh_.subscribe("/target/state", 1, &MssnBridge::onTargetState, this);
-        planned_sub_ = nh_.subscribe("/uav/planned_path", 1, &MssnBridge::onPlannedPath, this);
+        mode_state_topic_ = param_string(*this, "topics.mode_state", "aoa/uav/set_cruise_mode");
+        tracking_topic_ = param_string(*this, "topics.tracking_mode", "aoa/uav/tracking_mode");
 
-        // 命令队列 / 状态轮询线程
-        worker_ = std::thread(&MssnBridge::workerLoop, this);
-        poller_ = std::thread(&MssnBridge::pollerLoop, this);
+        // ── 进程管理配置 ──
+        enable_process_control_ = param_bool(*this, "mssn.enable_process_control", true);
+        const std::string workspace_dir = param_string(*this, "mssn.workspace_dir", ".");
+        const std::string setup_shell =
+            param_string(*this, "mssn.setup_shell", "source /opt/ros/humble/setup.bash && source install/setup.bash");
+        const std::string log_dir = param_string(*this, "mssn.log_dir", "/tmp/ros_mqtt_bridge_logs");
+        const double stop_timeout_s = param_double(*this, "mssn.stop_timeout_s", 5.0);
+        const double status_poll_hz = param_double(*this, "mssn.status_poll_hz", 1.0);
+        start_guide_on_mode_ = param_bool(*this, "mssn.start_guide_on_mode", true);
+        stop_guide_on_auto_ = param_bool(*this, "mssn.stop_guide_on_auto", false);
 
-        ROS_INFO("[mqtt_mssn_bridge] ready, broker=%s:%d status_hz=%.1f",
-                 cfg_.host.c_str(), cfg_.port, cfg_.status_hz);
-    }
+        ::mkdir(log_dir.c_str(), 0755);
+        const auto now_s = []() {
+            return std::to_string(static_cast<long long>(::time(nullptr)));
+        };
+        nav_.configure("nav", param_string(*this, "mssn.nav_launch_command",
+                                           "ros2 launch uav_guide uav_guide_launch.py"),
+                       param_string(*this, "mssn.nav_pgrep_pattern", "uav_guide_launch.py"),
+                       log_dir + "/nav_" + now_s() + ".log", setup_shell, workspace_dir, stop_timeout_s);
+        guide_.configure("guide", param_string(*this, "mssn.guide_run_command",
+                                               "ros2 run ros_mqtt_bridge mqtt_control_bridge"),
+                         param_string(*this, "mssn.guide_pgrep_pattern", "mqtt_control_bridge"),
+                         log_dir + "/guide_" + now_s() + ".log", setup_shell, workspace_dir,
+                         stop_timeout_s);
 
-    ~MssnBridge() { shutdown(); }
+        // ── ROS 镜像话题：模式（transient_local，缓存最新值给后启动的控制桥）──
+        rclcpp::QoS latched(rclcpp::KeepLast(1));
+        latched.transient_local().reliable();
+        pub_mode_state_ = create_publisher<std_msgs::msg::String>(mode_state_topic_, latched);
+        sub_tracking_ = create_subscription<std_msgs::msg::Bool>(
+            tracking_topic_, latched, [this](std_msgs::msg::Bool::SharedPtr msg) {
+                tracking_ = msg->data;
+            });
+        publishModeState();   // 启动即广播初始 auto
 
-    void attachMqtt(ros_mqtt_bridge::MqttClient* mqtt)
-    {
-        mqtt_ = mqtt;
-        mqtt_->addSubscription(cfg_.nav_cmd_topic);
-        mqtt_->addSubscription(cfg_.guide_cmd_topic);
-        mqtt_->addSubscription(cfg_.mode_cmd_topic);
-    }
-
-    /// MQTT 网络线程回调：入队，不阻塞网络线程。
-    void onMqttMessage(const std::string& topic, const std::string& payload)
-    {
-        {
-            std::lock_guard<std::mutex> lock(q_mutex_);
-            q_.push({topic, payload});
+        // ── MQTT 客户端（入站 + 状态出站）──
+        using MH = ros_mqtt_bridge::MqttClient::MessageHandler;
+        mqtt_ = std::make_unique<ros_mqtt_bridge::MqttClient>(
+            "bridge_mssn_" + std::to_string(::getpid()), host, port, keepalive, qos,
+            MH([this](const std::string& topic, const std::string& payload) {
+                onMqttMessage(topic, payload);
+            }));
+        mqtt_->addSubscription(mode_cmd_topic, qos);
+        mqtt_->addSubscription(nav_cmd_topic, qos);
+        mqtt_->addSubscription(guide_cmd_topic, qos);
+        if (!mqtt_->start()) {
+            RCLCPP_FATAL(get_logger(), "[mqtt_mssn_bridge] MQTT client start failed");
+            throw std::runtime_error("mqtt start failed");
         }
-        cv_.notify_one();
-    }
 
-    /// 停止工作线程（幂等）。须在 MQTT 客户端析构前调用。
-    void shutdown()
-    {
-        stop_ = true;
-        cv_.notify_all();
-        if (worker_.joinable()) worker_.join();
-        if (poller_.joinable()) poller_.join();
+        const int period_ms = std::max(100, static_cast<int>(1000.0 / std::max(0.1, status_poll_hz)));
+        timer_ = create_wall_timer(std::chrono::milliseconds(period_ms), [this]() { publishStatus(); });
+
+        RCLCPP_INFO(get_logger(),
+                    "[mqtt_mssn_bridge] ready: broker=%s:%d\n"
+                    "  in : %s | %s | %s\n"
+                    "  out: %s | %s\n"
+                    "  ros mirror: %s (%s, 初始 auto)\n"
+                    "  process_control=%d workspace='%s'",
+                    host.c_str(), port, mode_cmd_topic.c_str(), nav_cmd_topic.c_str(),
+                    guide_cmd_topic.c_str(), nav_status_topic_.c_str(), guide_status_topic_.c_str(),
+                    mode_state_topic_.c_str(), ros_mqtt_bridge::cruiseModeName(mode_),
+                    static_cast<int>(enable_process_control_), workspace_dir.c_str());
     }
 
 private:
-    struct CmdMsg { std::string topic; std::string payload; };
-
-    // ---- 命令处理（worker 线程，串行） ----
-
-    void workerLoop()
+    // ── MQTT 入站分发 ──
+    void onMqttMessage(const std::string& topic, const std::string& payload)
     {
-        std::unique_lock<std::mutex> lock(q_mutex_);
-        while (!stop_) {
-            cv_.wait(lock, [this] { return stop_ || !q_.empty(); });
-            while (!q_.empty()) {
-                const CmdMsg msg = q_.front();
-                q_.pop();
-                lock.unlock();
-                handleCmd(msg);
-                lock.lock();
-            }
+        if (topic.find("set_cruise_mode") != std::string::npos) {
+            handleMode(payload);
+        } else if (topic.find("/nav/cmd") != std::string::npos) {
+            handleSwitch(payload, "start", nav_, "nav");
+        } else if (topic.find("/guide/cmd") != std::string::npos) {
+            handleSwitch(payload, "start", guide_, "guide");
+        } else {
+            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] unexpected topic: %s", topic.c_str());
         }
     }
 
-    void handleCmd(const CmdMsg& msg)
+    void handleMode(const std::string& payload)
     {
-        if (msg.topic == cfg_.nav_cmd_topic) {
-            bool start = false;
-            std::string err;
-            if (!ros_mqtt_bridge::decodeStateBool(msg.payload, "start", start, err)) {
-                ROS_WARN("[mqtt_mssn_bridge] bad nav cmd JSON: %s", err.c_str());
-                return;
-            }
-            ROS_INFO("[mqtt_mssn_bridge] cmd nav=%s", start ? "start" : "stop");
-            if (start) ensureLaunch();
-            else stopLaunch();
-        } else if (msg.topic == cfg_.guide_cmd_topic) {
-            bool start = false;
-            std::string err;
-            if (!ros_mqtt_bridge::decodeStateBool(msg.payload, "start", start, err)) {
-                ROS_WARN("[mqtt_mssn_bridge] bad guide cmd JSON: %s", err.c_str());
-                return;
-            }
-            ROS_INFO("[mqtt_mssn_bridge] cmd guide=%s", start ? "start" : "stop");
-            if (start) {
-                ensureLaunch();   // 引导动作依赖导航服务
-                startWaypoint();
-            } else {
-                stopWaypoint();
-            }
-        } else if (msg.topic == cfg_.mode_cmd_topic) {
-            std::string raw;
-            std::string err;
-            if (!ros_mqtt_bridge::decodeStateString(msg.payload, "mode", raw, err)) {
-                ROS_WARN("[mqtt_mssn_bridge] bad mode cmd JSON: %s", err.c_str());
-                return;
-            }
-            const std::string mode = normalizeMode(raw);
-            if (mode.empty()) {
-                ROS_WARN("[mqtt_mssn_bridge] invalid intercept mode: '%s'",
-                         raw.c_str());
-                return;
-            }
-            ROS_INFO("[mqtt_mssn_bridge] cmd set intercept mode -> %s", mode.c_str());
-            if (cfg_.ensure_nav_on_mode) ensureLaunch();
-            std_msgs::String out;
-            out.data = mode;
-            mode_cmd_pub_.publish(out);
-        } else {
-            ROS_WARN("[mqtt_mssn_bridge] unknown cmd topic: %s", msg.topic.c_str());
+        const std::string raw = extractModeTolerant(payload);
+        ros_mqtt_bridge::CruiseMode parsed;
+        if (raw.empty() || !ros_mqtt_bridge::parseCruiseMode(raw, parsed)) {
+            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] invalid mode payload: %s", payload.c_str());
             return;
         }
-        publishStatus();
+        const auto previous = mode_;
+        mode_ = parsed;
+        publishModeState();
+        RCLCPP_INFO(get_logger(), "[mqtt_mssn_bridge] mode %s -> %s (mirrored to %s)",
+                    ros_mqtt_bridge::cruiseModeName(previous), ros_mqtt_bridge::cruiseModeName(mode_),
+                    mode_state_topic_.c_str());
+
+        if (!enable_process_control_) return;
+        if (mode_ != ros_mqtt_bridge::CruiseMode::Auto && start_guide_on_mode_) {
+            // 非 auto：确保出站控制桥在线（导航栈由显式 nav/cmd 控制）
+            guide_.start(get_logger());
+        } else if (mode_ == ros_mqtt_bridge::CruiseMode::Auto && stop_guide_on_auto_) {
+            guide_.stop(get_logger());
+        }
     }
 
-    // ---- 进程管理 ----
-
-    void ensureLaunch()
+    void handleSwitch(const std::string& payload, const char* key, ManagedProcess& proc,
+                      const char* label)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pgrep(cfg_.launch_match)) {
-            ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch already running");
+        bool start = false;
+        std::string err;
+        if (!ros_mqtt_bridge::decodeStateBool(payload, key, start, err)) {
+            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] bad %s cmd payload: %s (%s)", label,
+                        payload.c_str(), err.c_str());
             return;
         }
-        const std::string cmd = buildLaunchCmd(
-            cfg_.setup_shell,
-            "exec roslaunch " + cfg_.launch_pkg + " " + cfg_.launch_file);
-        const std::string log = cfg_.log_dir + "/uav_guide_launch.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting roslaunch %s %s (xterm/tmux)",
-                 cfg_.launch_pkg.c_str(), cfg_.launch_file.c_str());
-        nav_pid_ = launchInTerminal("uav_guide.launch", cmd, log, nav_session_);
-        for (int i = 0; i < cfg_.launch_timeout_s * 2; ++i) {
-            if (pgrep(cfg_.launch_match)) {
-                ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch started");
-                return;
-            }
-            usleep(500000);
-        }
-        ROS_ERROR("[mqtt_mssn_bridge] uav_guide.launch start timeout, "
-                  "check the xterm window or %s", log.c_str());
-    }
-
-    void startWaypoint()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (pgrep(cfg_.waypoint_match)) {
-            ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge already running");
+        RCLCPP_INFO(get_logger(), "[mqtt_mssn_bridge] %s cmd: %s", label, start ? "start" : "stop");
+        if (!enable_process_control_) {
+            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] process control disabled, %s ignored",
+                        label);
             return;
         }
-        const std::string cmd = buildLaunchCmd(
-            cfg_.setup_shell,
-            "exec rosrun ros_mqtt_bridge mqtt_waypoint_bridge");
-        const std::string log = cfg_.log_dir + "/mqtt_waypoint_bridge.log";
-        ROS_INFO("[mqtt_mssn_bridge] starting mqtt_waypoint_bridge (xterm/tmux)");
-        waypoint_pid_ = launchInTerminal("mqtt_waypoint_bridge", cmd, log, waypoint_session_);
-        for (int i = 0; i < cfg_.waypoint_timeout_s * 2; ++i) {
-            if (pgrep(cfg_.waypoint_match)) {
-                ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge started");
-                return;
-            }
-            usleep(500000);
+        if (start) {
+            proc.start(get_logger());
+        } else {
+            proc.stop(get_logger());
         }
-        ROS_ERROR("[mqtt_mssn_bridge] mqtt_waypoint_bridge start timeout, "
-                  "check the xterm window or %s", log.c_str());
     }
 
-    void stopWaypoint()
+    void publishModeState()
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!waypoint_session_.empty()) {
-            tmuxKillSession(waypoint_session_);
-            waypoint_session_.clear();
-        } else {
-            stopProcessGroup(waypoint_pid_);
-        }
-        pkillMatch(cfg_.waypoint_match);
-        waypoint_pid_ = -1;
-        ROS_INFO("[mqtt_mssn_bridge] mqtt_waypoint_bridge stopped");
+        std_msgs::msg::String msg;
+        msg.data = std::string("{\"mode\":\"") + ros_mqtt_bridge::cruiseModeName(mode_) + "\"}";
+        pub_mode_state_->publish(msg);
     }
-
-    void stopLaunch()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // 引导动作依赖导航，先停引导
-        if (!waypoint_session_.empty()) {
-            tmuxKillSession(waypoint_session_);
-            waypoint_session_.clear();
-        } else {
-            stopProcessGroup(waypoint_pid_);
-        }
-        pkillMatch(cfg_.waypoint_match);
-        waypoint_pid_ = -1;
-
-        if (!nav_session_.empty()) {
-            tmuxKillSession(nav_session_);
-            nav_session_.clear();
-        } else {
-            stopProcessGroup(nav_pid_);
-        }
-        pkillMatch(cfg_.launch_match);
-        nav_pid_ = -1;
-        ROS_INFO("[mqtt_mssn_bridge] uav_guide.launch stopped");
-    }
-
-    // ---- 状态回报 ----
 
     void publishStatus()
     {
-        bool nav = false, guide = false, tracking = false;
-        std::string mode;
-        ros_mqtt_bridge::UavStateJson uav, tgt;
-        std::vector<std::array<double, 6>> path;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            nav = pgrep(cfg_.launch_match);
-            guide = pgrep(cfg_.waypoint_match);
-            mode = intercept_mode_;
-            uav = uav_state_;
-            tgt = target_state_;
-            path = planned_path_;
+        const bool nav_running = nav_.running(get_logger());
+        const bool guide_running = guide_.running(get_logger());
+        if (nav_running != last_nav_running_ || guide_running != last_guide_running_) {
+            RCLCPP_INFO(get_logger(), "[mqtt_mssn_bridge] status nav=%d guide=%d", 
+                        static_cast<int>(nav_running), static_cast<int>(guide_running));
+            last_nav_running_ = nav_running;
+            last_guide_running_ = guide_running;
         }
-        ros::param::get("/uav_guide/tracking_mode", tracking);
-
-        if (!mqtt_) return;
-        // aoa/ai_guide/nav/status：导航服务运行态
-        mqtt_->publish(cfg_.nav_status_topic, ros_mqtt_bridge::encodeStateBool("running", nav));
-        // aoa/ai_guide/guide/status：引导运行态 + 模式 + TRACKING + 本机/目标位姿
-        mqtt_->publish(cfg_.guide_status_topic,
-                       "{\"running\":" + std::string(guide ? "true" : "false")
-                       + ",\"mode\":\"" + (mode.empty() ? std::string("unknown") : mode)
-                       + "\",\"tracking\":" + std::string(tracking ? "true" : "false") + ","
-                       + ros_mqtt_bridge::encodeUavStateField("uav_state", uav) + ","
-                       + ros_mqtt_bridge::encodeUavStateField("target_state", tgt) + "}");
-        // aoa/ai_guide/guide/planedpath：6 维规划路径列表
-        mqtt_->publish(cfg_.planedpath_topic,
-                       "{" + ros_mqtt_bridge::encodePlannedPathField("planedPath", path) + "}");
+        publishRaw(nav_status_topic_, ros_mqtt_bridge::encodeStateBool("running", nav_running),
+                   "nav/status");
+        std::ostringstream oss;
+        oss << "{\"running\":" << (guide_running ? "true" : "false")
+            << ",\"mode\":\"" << ros_mqtt_bridge::cruiseModeName(mode_) << "\""
+            << ",\"tracking\":" << (tracking_ ? "true" : "false") << "}";
+        publishRaw(guide_status_topic_, oss.str(), "guide/status");
     }
 
-    void pollerLoop()
+    void publishRaw(const std::string& topic, const std::string& payload, const char* what)
     {
-        const double hz = cfg_.status_hz > 0.1 ? cfg_.status_hz : 2.0;
-        ros::Rate rate(hz);
-        while (ros::ok() && !stop_) {
-            publishStatus();
-            rate.sleep();
+        if (mqtt_->publish(topic, payload)) {
+            RCLCPP_DEBUG(get_logger(), "[mqtt_mssn_bridge] %s → %s: %s", what, topic.c_str(),
+                         payload.c_str());
+        } else {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "[mqtt_mssn_bridge] publish %s failed (broker down?)", what);
         }
     }
 
-    void onInterceptMode(const std_msgs::String::ConstPtr& msg)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        intercept_mode_ = msg->data;
-    }
+    // ── 成员 ──
+    std::unique_ptr<ros_mqtt_bridge::MqttClient> mqtt_;
+    ManagedProcess nav_, guide_;
 
-    void onUavState(const nav_msgs::Odometry::ConstPtr& msg)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        uav_state_ = toUavStateJson(*msg);
-    }
+    std::string mode_state_topic_, tracking_topic_, nav_status_topic_, guide_status_topic_;
+    ros_mqtt_bridge::CruiseMode mode_ = ros_mqtt_bridge::CruiseMode::Auto;
+    bool enable_process_control_ = true;
+    bool start_guide_on_mode_ = true;
+    bool stop_guide_on_auto_ = false;
+    bool tracking_ = false;
+    bool last_nav_running_ = false;
+    bool last_guide_running_ = false;
 
-    void onTargetState(const nav_msgs::Odometry::ConstPtr& msg)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        target_state_ = toUavStateJson(*msg);
-    }
-
-    void onPlannedPath(const uav_guide::UavPlannedPath::ConstPtr& msg)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        planned_path_.clear();
-        planned_path_.reserve(msg->path.size());
-        for (const auto& p : msg->path) {
-            planned_path_.push_back({p.x, p.y, p.z, p.yaw, p.pitch, p.curvature});
-        }
-    }
-
-    static ros_mqtt_bridge::UavStateJson toUavStateJson(const nav_msgs::Odometry& odom)
-    {
-        ros_mqtt_bridge::UavStateJson s;
-        s.px = odom.pose.pose.position.x;
-        s.py = odom.pose.pose.position.y;
-        s.pz = odom.pose.pose.position.z;
-        s.ox = odom.pose.pose.orientation.x;
-        s.oy = odom.pose.pose.orientation.y;
-        s.oz = odom.pose.pose.orientation.z;
-        s.ow = odom.pose.pose.orientation.w;
-        s.vx = odom.twist.twist.linear.x;
-        s.vy = odom.twist.twist.linear.y;
-        s.vz = odom.twist.twist.linear.z;
-        return s;
-    }
-
-    // ---- 成员 ----
-
-    ros::NodeHandle& nh_;
-    const Config& cfg_;
-    ros_mqtt_bridge::MqttClient* mqtt_ = nullptr;
-    ros::Subscriber mode_sub_;
-    ros::Publisher mode_cmd_pub_;
-    ros::Subscriber uav_sub_;
-    ros::Subscriber target_sub_;
-    ros::Subscriber planned_sub_;
-
-    std::mutex mutex_;
-    pid_t nav_pid_ = -1;
-    pid_t waypoint_pid_ = -1;
-    std::string nav_session_;      // 无头 tmux 会话名（空 = 非 tmux 路径）
-    std::string waypoint_session_;
-    std::string intercept_mode_ = "unknown";
-    ros_mqtt_bridge::UavStateJson uav_state_;
-    ros_mqtt_bridge::UavStateJson target_state_;
-    std::vector<std::array<double, 6>> planned_path_;
-
-    std::mutex q_mutex_;
-    std::queue<CmdMsg> q_;
-    std::condition_variable cv_;
-    std::thread worker_;
-    std::thread poller_;
-    std::atomic<bool> stop_{false};
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_mode_state_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_tracking_;
+    rclcpp::TimerBase::SharedPtr timer_;
 };
 
-// ---------------------------------------------------------------------------
+}  // namespace
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "mqtt_mssn_bridge");
-    ros::NodeHandle nh("~");
-    const Config cfg = loadConfig(nh);
-
-    MssnBridge bridge(nh, cfg);
-
-    ros_mqtt_bridge::MqttClient mqtt(
-        "bridge_mssn_" + std::to_string(::getpid()), cfg.host, cfg.port, cfg.keepalive_s,
-        cfg.qos, [&bridge](const std::string& topic, const std::string& payload) {
-            bridge.onMqttMessage(topic, payload);
-        });
-    bridge.attachMqtt(&mqtt);
-
-    if (!mqtt.start()) {
-        ROS_FATAL("[mqtt_mssn_bridge] MQTT client start failed");
+    rclcpp::init(argc, argv);
+    try {
+        rclcpp::spin(std::make_shared<MssnBridge>());
+    } catch (const std::exception& ex) {
+        RCLCPP_FATAL(rclcpp::get_logger("mqtt_mssn_bridge"), "%s", ex.what());
+        rclcpp::shutdown();
         return 1;
     }
-
-    ROS_INFO("[mqtt_mssn_bridge] connected to %s:%d", cfg.host.c_str(), cfg.port);
-
-    ros::spin();
-    bridge.shutdown();
+    rclcpp::shutdown();
     return 0;
 }

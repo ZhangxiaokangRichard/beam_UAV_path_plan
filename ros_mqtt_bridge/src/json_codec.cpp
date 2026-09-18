@@ -11,10 +11,12 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iomanip>
 #include <sstream>
+#include <unistd.h>
 
 namespace ros_mqtt_bridge {
 namespace {
@@ -327,6 +329,62 @@ std::string encodePlannedPathField(const std::string& key,
     }
     o << "]";
     return o.str();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 2.0 新增：协议基础包与三条控制指令（4.4.17 / 4.4.19 / 4.4.21）
+// ═══════════════════════════════════════════════════════════════
+
+namespace {
+/// 当前 Unix 毫秒时间戳
+long long nowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+}  // namespace
+
+std::string MidGenerator::next()
+{
+    std::ostringstream o;
+    o << "uavg-" << static_cast<long long>(::getpid()) << "-" << nowMs() << "-" << (++seq_);
+    return o.str();
+}
+
+std::string makeBasePackage(const std::string& method, const std::string& data_json,
+                            const std::string& mid)
+{
+    std::ostringstream o;
+    o << "{\n"
+      << "  \"method\": \"" << method << "\",\n"
+      << "  \"timestamp\": " << nowMs() << ",\n"
+      << "  \"mid\": \"" << mid << "\",\n"
+      << "  \"data\": " << data_json << "\n"
+      << "}";
+    return o.str();
+}
+
+std::string encodeSetCruiseMode(const std::string& mid)
+{
+    return makeBasePackage("set_cruise_mode", "{}", mid);
+}
+
+std::string encodeSetFlyHead(double heading_deg, const std::string& mid)
+{
+    double heading = std::fmod(heading_deg, 360.0);
+    if (heading < 0.0) heading += 360.0;
+
+    std::ostringstream data;
+    data << "{\"heading\":" << std::fixed << std::setprecision(1) << heading << "}";
+    return makeBasePackage("set_fly_head", data.str(), mid);
+}
+
+std::string encodeSetFlyHeight(double height_m, int height_type, const std::string& mid)
+{
+    std::ostringstream data;
+    data << "{\"height\":" << std::llround(height_m) << ",\"height_type\":" << height_type << "}";
+    return makeBasePackage("set_fly_height", data.str(), mid);
 }
 
 }  // namespace ros_mqtt_bridge

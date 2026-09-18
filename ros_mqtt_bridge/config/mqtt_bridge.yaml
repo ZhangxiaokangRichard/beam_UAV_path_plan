@@ -1,33 +1,47 @@
-mqtt:
-  host: 192.168.70.62
-  port: 1883
-  keepalive_s: 30
-  qos: 0
-  topic_prefix: beam_dubins
-  # 注意：节点读取的是 /mqtt/uav_info_topic（代码参数名），非 target_topic
-  uav_info_topic: aoa/uav_center/+/uav_info
+# ═══════════════════════════════════════════════════════════════
+# ros_mqtt_bridge 配置（ROS2 Humble，mqtt_target_bridge）
+#   - MQTT 入站话题与 1.0.1 **保持一致**（协议约定，不随版本变化）
+#   - ROS 侧话题统一 aoa/ 前缀
+#   - 现场实测（2026-09-18）：broker 192.168.70.62:1883 在线；
+#     当前 uav_sn = "V2.4AOACRAFT-NOCONF0"（→ own；出现 SIL 目标时请改 target filter）
+# ═══════════════════════════════════════════════════════════════
+/**:
+  ros__parameters:
+    mqtt:
+      host: "192.168.70.62"
+      port: 1883
+      qos: 0
+      keepalive_s: 30
+      # 协议 4.3.2：aoa/uav_center/${uav_sn}/uav_info（订阅用 + 通配，按 sn 路由）
+      uav_info_topic: "aoa/uav_center/+/uav_info"
 
-geodesy:
-  origin_latitude_deg: 31.58461930
-  origin_longitude_deg: 104.88313540
-  origin_altitude_m: 515.0
-  altitude_reference: ellipsoid
+    geodesy:
+      # ⚠ 必须设置为**作业现场原点**：否则 ENU 坐标偏移过大，规划空间（10km×5km）会失配
+      origin_latitude_deg: 30.35267300
+      origin_longitude_deg: 104.17036000
+      origin_altitude_m: 100.0
 
-target:
-  publish_tf: true
-  timeout_ms: 5000
-  # target 专属 MQTT broker（未设置时回退 /mqtt/host、/mqtt/port）
-  mqtt_host: 192.168.70.62
-  mqtt_port: 1883
+    target:
+      publish_tf: true
+      timeout_ms: 5000.0
+      mqtt_host: "192.168.70.62"   # 未设置时回退 mqtt.host
+      mqtt_port: 1883
 
-own:
-  # own（本机 uav）专属 MQTT broker（未设置时回退 /mqtt/host、/mqtt/port）
-  mqtt_host: 192.168.70.62
-  mqtt_port: 1883
+    own:
+      mqtt_host: "192.168.70.62"
+      mqtt_port: 1883
 
-bridge:
-  # target/own 均从 uav_caster/uavs_information 发现（代码均用 decodeUavsInfo 解析 uavs[] 格式）
-  target_uav_topic: uav_caster/uavs_information
-  target_uav_filter: "3NF0"
-  own_uav_topic: uav_caster/uavs_information
-  own_uav_filter: "WNF0"
+    bridge:
+      # uav / target 列表（话题名由 yaml 决定）
+      target_uav_topic: "uav_caster/uavs_information"
+      target_uav_filter: "SIL"      # 目标：含 SIL 的 sn；无匹配时回退列表首项（1.0.1 行为）
+      own_uav_topic: "uav_caster/uavs_information"
+      own_uav_filter: "NOCON"       # 现场实测 sn 为 V2.4AOACRAFT-NOCONF0
+
+    topics:
+      uav_state: "aoa/uav/state"
+      target_state: "aoa/target/state"
+
+    tf:
+      world_frame: "map"            # 与 1.0.1 一致：map → <uav_sn>
+

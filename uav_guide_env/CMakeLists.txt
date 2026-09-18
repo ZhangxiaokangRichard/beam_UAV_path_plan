@@ -1,103 +1,30 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(uav_guide_env)
 
-# C++17 标准
-set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 查找依赖包
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  std_msgs
-  nav_msgs
-  visualization_msgs
-  tf
-  beam_dubins          # 依赖 Phase 1-2a 的算法包
-)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(beam_dubins REQUIRED)
+find_package(uav_guide REQUIRED)
 
-# 包配置
-catkin_package(
-  INCLUDE_DIRS include
-  CATKIN_DEPENDS
-    roscpp
-    std_msgs
-    nav_msgs
-    visualization_msgs
-    tf
-    beam_dubins
-)
+# ── 可视化节点 ────────────────────────────────────────────────
+add_executable(uav_viz_node src/uav_viz_node.cpp)
+ament_target_dependencies(uav_viz_node
+  rclcpp std_msgs nav_msgs geometry_msgs visualization_msgs tf2 tf2_geometry_msgs
+  beam_dubins uav_guide)
 
-# 包含目录
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-)
+install(TARGETS uav_viz_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
-# ── 环境模型库（静态库）───────────────────────────────────
-add_library(uav_guide_env_core STATIC
-  src/uav_model.cpp
-  src/target_trajectory.cpp
-  src/obstacle_manager.cpp
-)
-
-target_link_libraries(uav_guide_env_core
-  ${catkin_LIBRARIES}
-)
-
-# 确保依赖的消息已生成
-add_dependencies(uav_guide_env_core
-  beam_dubins_generate_messages_cpp
-  ${catkin_EXPORTED_TARGETS}
-)
-
-# ── simulation_loop 节点（Phase 3 v0.1）─────────────────────
-add_executable(simulation_loop
-  src/simulation_loop.cpp
-)
-target_link_libraries(simulation_loop
-  uav_guide_env_core
-  ${catkin_LIBRARIES}
-)
-add_dependencies(simulation_loop
-  beam_dubins_generate_messages_cpp
-  ${catkin_EXPORTED_TARGETS}
-)
-
-# sitl_loop.cpp removed — target disabled
-# add_executable(sitl_loop
-#   src/sitl_loop.cpp
-# )
-# target_link_libraries(sitl_loop
-#   uav_guide_env_core
-#   ${catkin_LIBRARIES}
-# )
-# add_dependencies(sitl_loop
-#   beam_dubins_generate_messages_cpp
-#   ${catkin_EXPORTED_TARGETS}
-# )
-
-# ── target_publisher 节点（Phase 3 v0.1 新增）───────────────
-add_executable(target_publisher
-  src/target_publisher.cpp
-)
-target_link_libraries(target_publisher
-  uav_guide_env_core
-  ${catkin_LIBRARIES}
-)
-
-# ── uav_logger 节点（仿真数据 JSON 记录）─────────────────────
-add_executable(uav_logger
-  src/uav_logger.cpp
-)
-target_link_libraries(uav_logger
-  ${catkin_LIBRARIES}
-)
-
-# ── rviz_publisher 节点（Phase 3）───────────────────────────
-add_executable(rviz_publisher
-  src/rviz_publisher.cpp
-)
-target_link_libraries(rviz_publisher
-  uav_guide_env_core
-  ${catkin_LIBRARIES}
-)
+ament_package()

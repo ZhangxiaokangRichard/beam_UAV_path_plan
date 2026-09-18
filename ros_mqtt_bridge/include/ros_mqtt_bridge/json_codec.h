@@ -58,4 +58,33 @@ std::string encodeUavStateField(const std::string& key, const UavStateJson& stat
 std::string encodePlannedPathField(const std::string& key,
                                    const std::vector<std::array<double, 6>>& path);
 
+// ═══════════════════════════════════════════════════════════════
+// 2.0 新增：协议基础包 + 三条控制指令编码
+//   参考《LJD 网络通信协议》4.4.17 / 4.4.19 / 4.4.21
+//   （入站解析函数 decode* 行为与 1.0.1 完全一致，未改动）
+// ═══════════════════════════════════════════════════════════════
+
+/** 报文 ID 生成器：mid = "uavg-<pid>-<epoch_ms>-<seq>"，进程内单调递增。 */
+class MidGenerator {
+public:
+    std::string next();
+
+private:
+    std::uint64_t seq_ = 0;
+};
+
+/** 协议基础包（method / timestamp / mid / data）。
+ *  @param data_json 已编码好的 data 对象字面量（如 "{}"）。 */
+std::string makeBasePackage(const std::string& method, const std::string& data_json,
+                            const std::string& mid);
+
+/** set_cruise_mode（协议 4.4.17）：切换巡航模式，data 为空对象。 */
+std::string encodeSetCruiseMode(const std::string& mid);
+
+/** set_fly_head（协议 4.4.19）：设置飞行航向 heading ∈ [0,360)，单位度。 */
+std::string encodeSetFlyHead(double heading_deg, const std::string& mid);
+
+/** set_fly_height（协议 4.4.21）：设置飞行高度；height_type: 0 场高 / 1 绝对高度。 */
+std::string encodeSetFlyHeight(double height_m, int height_type, const std::string& mid);
+
 }  // namespace ros_mqtt_bridge

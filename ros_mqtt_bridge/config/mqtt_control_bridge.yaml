@@ -1,0 +1,28 @@
+/**:
+  ros__parameters:
+    mqtt:
+      host: 192.168.70.62
+      port: 1883
+      qos: 0
+      keepalive_s: 30
+      # 出站话题模板：${uav_sn} 由 aoa/uav/state 的 child_frame_id 填充
+      event_services_template: aoa/uav_control/${uav_sn}/event_services
+      # true = 只打印不发（联调/离线测试用）
+      dry_run: false
+
+    topics:
+      mode_state: aoa/uav/set_cruise_mode      # 模式权威源（由 mqtt_mssn_bridge 转入）
+      setpoint: aoa/uav/setpoint               # 指点通道 → fly_point
+      guidance: aoa/uav/guidance               # 巡航通道 → set_fly_head + set_fly_height
+      uav_state: aoa/uav/state                 # 取 uav_sn（child_frame_id）
+      tracking_mode: aoa/uav/tracking_mode     # 仅日志指示
+
+    cmd:
+      height_type: 0            # 0 场高 / 1 绝对高度（协议 4.4.21）
+      min_interval_s: 1.0       # 巡航通道最小下发间隔（≥1 Hz，避免刷爆链路）
+      heading_eps_deg: 1.0      # 航向变化阈值
+      height_eps_m: 0.5         # 高度变化阈值
+      resend_cruise_mode_s: 0.0 # >0 时在 cruise 下周期重发 set_cruise_mode（0 = 仅边沿）
+      require_mode: true        # false = 直通（始终按 setpoint 发 fly_point，P6 前行为）
+      mode_timeout_s: 0.0       # >0 时模式消息超时 → 回落 auto（失效安全，0 = 关闭）
+      set_fly_speed_enabled: false  # set_fly_speed 预留，本轮不编码

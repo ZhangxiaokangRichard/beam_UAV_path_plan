@@ -1,0 +1,30 @@
+/**:
+  ros__parameters:
+    # ⚠ 安全联调配置：出站重定向到 beam_test/* 测试话题，绝不会触碰真机控制话题
+    #   aoa/uav_control/<real_sn>/event_services
+    # 用法：ros2 launch ros_mqtt_bridge mqtt_control_bridge.launch.py \
+    #         config:=<share>/ros_mqtt_bridge/config/mqtt_control_bridge_test.yaml
+    mqtt:
+      host: 192.168.70.62
+      port: 1883
+      qos: 0
+      keepalive_s: 30
+      event_services_template: beam_test/uav_control/${uav_sn}/event_services
+      dry_run: false
+
+    topics:
+      mode_state: aoa/uav/set_cruise_mode
+      setpoint: aoa/uav/setpoint
+      guidance: aoa/uav/guidance
+      uav_state: aoa/uav/state
+      tracking_mode: aoa/uav/tracking_mode
+
+    cmd:
+      height_type: 0
+      min_interval_s: 1.0
+      heading_eps_deg: 1.0
+      height_eps_m: 0.5
+      resend_cruise_mode_s: 0.0
+      require_mode: true
+      mode_timeout_s: 0.0
+      set_fly_speed_enabled: false

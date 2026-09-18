@@ -1,0 +1,41 @@
+/**:
+  ros__parameters:
+    frame_id: map
+
+    # 空间边界（与 uav_guide/config/uav_guide.yaml 的 space 段保持一致）
+    space:
+      lx: 10000.0          # 东向长度 (m)
+      ly: 5000.0           # 北向长度 (m)
+      lz: 1000.0           # 高度 (m)
+      boundary_margin: 50.0
+
+    # 无真实数据时的占位位置（1.0.1 scenario 默认值）
+    viz:
+      default_uav_x: 2000.0
+      default_uav_y: 1000.0
+      default_uav_z: 500.0
+      default_uav_yaw: 1.5707963267948966
+      default_target_x: 4000.0
+      default_target_y: 2500.0
+      default_target_z: 600.0
+      default_target_yaw: 1.5707963267948966
+      model_rate_hz: 5.0        # UAV/目标 Marker 刷新率
+      status_rate_hz: 1.0       # 文本 Marker 刷新率
+      trail_max_points: 2000    # 航迹最大点数
+      trail_min_step_m: 20.0    # 航迹最小采样间距（去抖）
+      status_text: "Beam Dubins 2.0"
+
+    topics:
+      uav_state: aoa/uav/state
+      target_state: aoa/target/state
+      planed_path: aoa/uav/planed_path
+      status_text: aoa/viz/status_text
+      env_bounds: aoa/viz/env_bounds
+      uav_model: aoa/viz/uav_model
+      uav_sphere: aoa/viz/uav_sphere
+      target_model: aoa/viz/target_model
+      target_arrow: aoa/viz/target_arrow
+      status: aoa/viz/status
+      plan_text: aoa/viz/plan_text
+      uav_trail: aoa/viz/uav_trail
+      planed_path_vis: aoa/viz/planed_path

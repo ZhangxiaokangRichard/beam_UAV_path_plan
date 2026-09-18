@@ -1,27 +1,30 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>beam_dubins</name>
-  <version>0.1.0</version>
+  <version>2.0.0</version>
   <description>
-    Beam Dubins 全局路径规划算法包（Phase 1：纯 C++ 核心算法库）。
-    提供基于受限宽度束搜索 (Beam Search) 的 Dubins 路径规划，
-    支持固定翼 UAV 最小转弯半径约束下的 2D/3D 路径搜索。
-    算法层不依赖 ROS 图形化，可独立编译和单元测试。
+    Beam Dubins 全局路径规划（ROS2 Humble）。
+    算法核心 beam_dubins_core 为纯 C++17、**零 ROS 依赖**，与 1.0.1 逐字节一致；
+    planner_server 是唯一 ROS 包装层，提供 aoa/beam_dubins/plan_path 服务。
   </description>
 
   <maintainer email="ros-dev@example.com">ros-dev</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>roscpp</depend>
+  <depend>rclcpp</depend>
   <depend>std_msgs</depend>
-  <depend>message_generation</depend>
-  <depend>message_runtime</depend>
+  <depend>eigen</depend>
 
-  <test_depend>rosunit</test_depend>
-  <test_depend>gtest</test_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

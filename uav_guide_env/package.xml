@@ -1,25 +1,33 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>uav_guide_env</name>
-  <version>0.1.0</version>
+  <version>2.0.0</version>
   <description>
-    UAV 引导仿真环境包（Phase 2b：环境模型骨架）。
-    提供固定翼 UAV 运动学模型、动态目标轨迹生成、AABB 障碍物管理。
-    依赖 beam_dubins 算法包进行路径规划。
+    2.0 精简包：仅保留可视化。
+      uav_viz_node  UAV/目标 3D Marker（保留 1.0.1 的箭头/球体配色与尺寸）、空间边界线框、
+                    状态文本、UAV 航迹、规划路径（uav_guide/UavPlannedPath → nav_msgs/Path）
+    1.0.1 的 simulation_loop / target_publisher / target_trajectory / uav_model /
+    obstacle_manager / uav_logger 已移除（仿真职责取消，真实数据由 ros_mqtt_bridge 提供）。
   </description>
 
   <maintainer email="ros-dev@example.com">ros-dev</maintainer>
   <license>MIT</license>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>roscpp</depend>
+  <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
-  <depend>tf</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
   <depend>beam_dubins</depend>
+  <depend>uav_guide</depend>
+  <depend>ros_mqtt_bridge</depend>
 
   <export>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

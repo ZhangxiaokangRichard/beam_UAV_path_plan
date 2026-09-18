@@ -1,8 +1,0 @@
-<launch>
-  <!-- mqtt_mssn_bridge 配置（私有命名空间，避免与 mqtt_bridge.yaml 全局参数冲突） -->
-  <rosparam file="$(find ros_mqtt_bridge)/config/mqtt_mssn_bridge.yaml" command="load" ns="mqtt_mssn_bridge"/>
-
-  <!-- respawn：节点异常退出后自动拉起 -->
-  <node pkg="ros_mqtt_bridge" type="mqtt_mssn_bridge" name="mqtt_mssn_bridge"
-        output="screen" respawn="true"/>
-</launch>

@@ -1,4 +1,4 @@
-# 规划结果（内部 / debug）
+# 规划结果（内部）
 std_msgs/Header header
 bool success
 float64 cost

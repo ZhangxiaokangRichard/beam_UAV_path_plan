@@ -1,29 +1,30 @@
 /**:
   ros__parameters:
+    # ⚠ 安全联调配置：MQTT 话题全部落在 beam_test/*，且不启停任何本机进程
     mqtt:
       host: 192.168.70.62
       port: 1883
       qos: 0
       keepalive_s: 30
-      mode_cmd_topic: aoa/ai_guide/set_cruise_mode
-      nav_cmd_topic: aoa/ai_guide/nav/cmd
-      guide_cmd_topic: aoa/ai_guide/guide/cmd
-      nav_status_topic: aoa/ai_guide/nav/status
-      guide_status_topic: aoa/ai_guide/guide/status
+      mode_cmd_topic: beam_test/ai_guide/set_cruise_mode
+      nav_cmd_topic: beam_test/ai_guide/nav/cmd
+      guide_cmd_topic: beam_test/ai_guide/guide/cmd
+      nav_status_topic: beam_test/ai_guide/nav/status
+      guide_status_topic: beam_test/ai_guide/guide/status
 
     topics:
-      mode_state: aoa/uav/set_cruise_mode     # ROS 镜像（transient_local）
+      mode_state: aoa/uav/set_cruise_mode
       tracking_mode: aoa/uav/tracking_mode
 
     mssn:
-      enable_process_control: true   # false = 只转发模式，不启停任何进程
+      enable_process_control: false
       workspace_dir: /home/ros-dev/beamDubins_ws
       setup_shell: source /opt/ros/humble/setup.bash && source install/setup.bash
       log_dir: /tmp/ros_mqtt_bridge_logs
       stop_timeout_s: 5.0
       status_poll_hz: 1.0
-      start_guide_on_mode: true      # 模式 != auto 时确保 mqtt_control_bridge 在线
-      stop_guide_on_auto: false      # 模式回 auto 时不自动杀死控制桥（默认保活）
+      start_guide_on_mode: false
+      stop_guide_on_auto: false
       nav_launch_command: ros2 launch uav_guide uav_guide_launch.py
       nav_pgrep_pattern: uav_guide_launch.py
       guide_run_command: ros2 run ros_mqtt_bridge mqtt_control_bridge
