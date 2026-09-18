@@ -73,17 +73,23 @@
       sample_rule: "first_zero_curvature"     # | first_nonzero_curvature
       heads_source: "sample_yaw"              # | bearing_to_sample
       height_source: "sample_point_z"         # | target_z
-      pose_source: "tf2"                      # | topic
+      # pose_source：本机位姿来源。
+      #   topic = 直接用 aoa/uav/state（**现场推荐**：无 TF 依赖，SN 变化无需改配置）
+      #   tf2   = 查 map→uav_frame；需把 uav_frame 设为 mqtt_target_bridge 广播的
+      #           子帧名（即飞机 SN，如 V2.4AOACRAFT-NOCONF0），否则每秒 WARN 并回落 topic
+      pose_source: "topic"                    # | tf2
       map_frame: "map"
-      uav_frame: "aoa/uav_base_link"
+      uav_frame: "aoa/uav_base_link"          # 仅 pose_source=tf2 时生效
 
     # ── 输出（观测话题）──
     output:
       planed_path_topic: "aoa/uav/planed_path"
       tracking_mode_topic: "aoa/uav/tracking_mode"
 
-    # ── 地理原点（**须与 ros_mqtt_bridge 的 geodesy.* 保持一致**）──
+    # ── 地理原点（**必须与 ros_mqtt_bridge/config/mqtt_bridge.yaml 的 geodesy.* 完全一致**）──
+    # 不一致会导致 fly_point 经纬度整体偏移（ENU→WGS84 反算错误），实测教训：差 5.4 km。
+    # 现场标定值（2026-09-18）：
     geodesy:
-      origin_latitude_deg: 31.58461930
-      origin_longitude_deg: 104.88313540
-      origin_altitude_m: 515.0
+      origin_latitude_deg: 31.5959681
+      origin_longitude_deg: 104.9380182
+      origin_altitude_m: 100.0

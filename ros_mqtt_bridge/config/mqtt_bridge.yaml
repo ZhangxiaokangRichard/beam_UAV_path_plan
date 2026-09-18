@@ -16,9 +16,9 @@
       uav_info_topic: "aoa/uav_center/+/uav_info"
 
     geodesy:
-      # ⚠ 必须设置为**作业现场原点**：否则 ENU 坐标偏移过大，规划空间（10km×5km）会失配
-      origin_latitude_deg: 30.35267300
-      origin_longitude_deg: 104.17036000
+      # 设置地理坐标系原点（ENU 坐标系的参考点）
+      origin_latitude_deg: 31.5959681
+      origin_longitude_deg: 104.9380182
       origin_altitude_m: 100.0
 
     target:

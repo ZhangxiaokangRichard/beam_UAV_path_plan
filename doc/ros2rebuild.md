@@ -928,6 +928,46 @@ $$
 
 ---
 
+## 附录 F：现场联调与分节点验收（2026-09-18，双机同区）
+
+> 现场状态：原点上移为 31.5959681 / 104.9380182 / 100.0（人工标定）；本机
+> `V2.4AOACRAFT-NOCONF0` 与目标 `V2.4AOACRAFT-SIL3NF0` 已同处作业区（水平间距 3.5~5 km）。
+
+### F.1 联调中修正的两处配置缺陷（**务必保持**）
+
+| # | 缺陷 | 量化影响 | 修正 |
+|---|---|---|---|
+| 1 | `uav_guide.yaml` 的 `geodesy.origin_*` 未随 `mqtt_bridge.yaml` 同步（旧值 31.5846193/104.8831354/515） | `fly_point` 经纬度整体偏移 **5357.7 m（水平）+ 417.6 m（高度）** → 飞机飞向错误位置 | 两处统一为 31.5959681 / 104.9380182 / 100.0；yaml 内加注释强调必须一致 |
+| 2 | `guidance.pose_source: tf2`，但 `uav_frame` 默认 `aoa/uav_base_link` 而桥广播的子帧名是飞机 SN | 每周期 `tf2 ... failed, fallback to topic` WARN（功能可用但噪声大、依赖 SN 配置） | 现场默认改为 `pose_source: "topic"`（`aoa/uav/state` 直取，无 TF/SN 依赖）；`tf2` 保留为外部位姿来源选项 |
+
+### F.2 分节点验收基线（T1–T9，全部通过）
+
+| # | 被测对象 | 关键判据 | 实测结果 |
+|---|---|---|---|
+| T1 | `mqtt_target_bridge` | 频率、双机识别、ENU 数值、TF | 双机识别正确；`aoa/uav/state` 1.87~2.29 Hz、`aoa/target/state` ≈2 Hz；TF `map→<sn>` ✓ |
+| T1b | **坐标实现级校验** | C++ `Geodesy::toLocal` vs 独立 Python WGS84 | **逐位一致（0 差异）**；在线上目标精确配对残差 **0.0 m** |
+| T2 | `planner_server` | `success` / 误差 / 绕障 | 2 km 直飞 cost 2255.65 m（比 1.009）、障碍绕行 3133.41 m（比 1.401，弧段点 53→105）、真实几何 5534 m；**goal error 均 0.000 m** |
+| T3 | `uav_guide_loop_node` | 闭环坐标、状态机 | `path[0]` = 本机 ENU（**0.0 m**）；`path[-1]` = 目标 + 2300 m × 航向（**0.0 m**）；`phase=APPROACH`、`intercept=head-on` |
+| T4 | `uav_guide_point_node` | 5 Hz、弧心自洽、经纬度合理性 | 5.08 Hz；引导点到路径最近距离 **500.0 m = \|radius\|**；`fly_point` 距真实目标 1.75 km（若原点不一致将额外叠加 5.36 km） |
+| T5 | `uav_guidance_node` | 与算法规则逐位一致 | `heads` 发布 110.64° / 复算 110.64°（**0.000°**）；`fly_height` 偏差 **0.000 m** |
+| T6 | `uav_viz_node` | Marker 频率/内容/转换 | Marker 4.97 Hz、文本 1.03 Hz；`plan OK cost=3639 m pts=154`；路径 154 点转 `nav_msgs/Path`；rviz2 加载无错误 |
+| T7 | `mqtt_mssn_bridge` | 模式镜像、状态上报、启停 | 模式镜像 `auto→cruise` ✓；1 Hz 状态上报 ✓；`nav/cmd`+`guide/cmd` 启停残留 0 进程、桥自身存活 ✓ |
+| T8 | `mqtt_control_bridge` | 截断矩阵 + 限流（沙箱话题） | `auto` **0 条**；`setpoint` **45 条 = 9 s × 5 Hz**（仅 `fly_point`）；`cruise` **1 + 20 + 20**（`set_cruise_mode` 边沿 + ≈1 Hz 限流）；出网仅在 `beam_test/*` 沙箱 |
+| T9 | launch 启动路径 | 节点/话题/服务齐全 | 4 节点 + planner + TF 监听；`planed_path` 3.63 Hz、`setpoint` 5.08 Hz、`guidance` 3.66 Hz；launch 日志无 error |
+
+> 结论：四包功能与坐标系端到端一致（ENU → 规划 → 路径 → 引导点经纬度 → 出网指令全链路自洽），
+> 出站截断与限流符合 §5.5 设计，且有真机在线时全程走沙箱话题、未向真机控制话题发布任何指令。
+
+### F.3 新增交付物
+
+| 文件 | 用途 |
+|---|---|
+| `tools/enu_check.py` | **现场坐标校验工具**：MQTT 大地坐标 → 独立 Python WGS84 ENU，与 `aoa/{uav,target}/state` 自动比对（换原点/换场地后必做） |
+| `tools/plan_path_client.py` | 规划服务测试客户端：精简输出（success/cost/绕行比/目标误差/弧段点），支持 `--obstacle/--space/--margin/--use-3d` |
+| `doc/quick_start.md` | 本版本架构、分功能包测试方法、正常启动流程命令（含 T1–T9 实测基线与故障排查） |
+
+---
+
 ## 变更记录
 
 | 版本 | 日期 | 说明 |
@@ -937,5 +977,6 @@ $$
 | **v2.1** | **2026-09-18** | **按第二轮裁决修订**：① Q8 → **保留 `mqtt_mssn_bridge`**，由它决定 `mqtt_control_bridge` 与 `uav_guide_launch.py` 的启停，并独占 `aoa/ai_guide/*` 入站（含模式主题）；② Q12/Q16 → `heads` 取**采样点**（自 uav 起沿 `planed_path` **首个曲率为 0 的点**）在 ENU 下的航向，参数 `sample_rule` 可切换；③ Q14 → 模式字符串固定为 `auto`/`setpoint`/`cruise`；④ Q19 → ROS 话题拼写统一为 `aoa/uav/planed_path`；⑤ 两制导节点**不订阅** `aoa/uav/set_cruise_mode`（仅 `mqtt_control_bridge` 订阅用于截断，其余为 debug 状态流）；⑥ **算法层不再复刻 7 个 Python 模块**，改为按“共享/独有”切分的命名空间 + 自由函数（`geo`/`path`/`setpoint`/`guidance`/`state`/`mode`/`orchestrator`/`plan`/`types`），零 ROS 依赖 |
 | **v2.2** | **2026-09-18** | **P6 实施记录**（§附录 D）：`mode_gate`（零 ROS 截断矩阵）+ `mqtt_control_bridge` + `mqtt_mssn_bridge` + 2 生产/2 测试配置 + 3 launch + 10 个单测；实测：截断矩阵 4 阶段全部符合预期、20 Hz→1 Hz 限流精确、进程启停 0 残留；修复 2 个真 Bug（`pgrep`/`pkill` 自我匹配 → 改 `/proc` 扫描并按会话排除；僵尸组长 → 先 `waitpid` 回收）；记录现场双机 140 km 分离的作业区问题 |
 | **v2.3** | **2026-09-18** | **P7 实施记录**（§附录 E）：`uav_guide_env` 精简为纯可视化包（`uav_viz_node` 完整保留 1.0.1 的 ns/尺寸/配色/存活期/刷新率）+ rviz2 配置重建（13 个 Display，加载零错误）+ README；新增 `aoa/viz/plan_text`、`aoa/viz/uav_trail`、`aoa/viz/planed_path`；澄清切平面 ENU 对 115 km 目标 `z=-385 m` 的固有曲率误差（非 Bug） |
+| **v2.4** | **2026-09-18** | **现场联调与分节点验收**（§附录 F）：① 修正两处配置缺陷——`uav_guide.yaml` 原点未同步（量化偏差 5357.7 m / 417.6 m）与 `guidance.pose_source` 的 TF 帧名依赖；② T1–T9 分节点验收全部通过（坐标实现级校验逐位一致、`path[0]`/虚拟门偏差 0.0 m、`heads`/`fly_height` 逐位一致、截断矩阵与限流实测符合设计）；③ 新增 `tools/enu_check.py`、`tools/plan_path_client.py` 与 `doc/quick_start.md` |
 
 
