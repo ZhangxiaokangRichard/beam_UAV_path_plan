@@ -1,9 +1,17 @@
 /**
  * @file mode_gate.h
- * @brief 制导模式与出站截断矩阵（**零 ROS，便于单测**）
+ * @brief 导航模式与出站「透传映射表」（**零 ROS，便于单测**）
  *
- * 模式权威源：MQTT 入站 `aoa/ai_guide/set_cruise_mode` 的 mode 字段（经 mqtt_mssn_bridge 转入 ROS）。
- * 出站只由 mqtt_control_bridge 执行，因此把判定逻辑抽成纯函数，可离线单测 3×2 矩阵与边沿。
+ * 数据流（2026-09-20 裁决）：
+ *   MQTT `aoa/ai_guide/nav/mode`  (auto | setpoint | guidance)
+ *     → mqtt_mssn_bridge → ROS `aoa/uav/nav_mode`（std_msgs/String，**latched**）
+ *     → mqtt_control_bridge 按本表 **1:1 翻译**为 MQTT 指令
+ *
+ * **纯翻译器语义**：不节流、不去抖、不做阈值判断；出站频率完全等于上游 ROS 话题频率
+ * （两个制导节点均为 5 Hz 定时器 → guidance 模式出站亦为 5 Hz）。
+ *
+ * 模式是**状态**而非边沿：`mqtt_control_bridge` 启动时通过 latched 的 `aoa/uav/nav_mode`
+ * 立即得到当前模式，无需等待“模式变化”事件。
  */
 
 #pragma once
@@ -12,30 +20,41 @@
 
 namespace ros_mqtt_bridge {
 
-/// 制导模式（字符串取值固定：auto / setpoint / cruise）
-enum class CruiseMode { Auto, Setpoint, Cruise };
+/// 导航模式（字符串取值固定：auto / setpoint / guidance）
+enum class NavMode { Auto, Setpoint, Guidance };
 
-/// 解析模式字符串（兼容 data 包裹由调用方处理）；非法返回 false 且不修改 out
-bool parseCruiseMode(const std::string& raw, CruiseMode& out);
+/// 解析模式字符串（容忍空白/大小写）；非法返回 false 且不修改 out
+bool parseNavMode(const std::string& raw, NavMode& out);
 
-/// 模式名（"auto" / "setpoint" / "cruise"）
-const char* cruiseModeName(CruiseMode mode);
+/// 模式名（"auto" / "setpoint" / "guidance"）
+const char* navModeName(NavMode mode);
 
-/// 出站通道
-enum class OutChannel {
-    Setpoint,   // → fly_point（指点：位置 + 半径）
-    Guidance,   // → set_fly_head + set_fly_height（巡航：航向 + 高度）
+/// 出站指令种类（= MQTT method）
+enum class OutMethod {
+    FlyPoint,        // ← aoa/uav/setpoint  (setpoint 模式)
+    SetCruiseMode,   // ← aoa/uav/guidance  (guidance 模式，与 head/height 同频)
+    SetFlyHead,      // ← aoa/uav/guidance
+    SetFlyHeight,    // ← aoa/uav/guidance
+};
+
+/// 某模式下「每条上游消息」应翻译出的 MQTT 指令集合
+struct OutboundPlan {
+    bool fly_point = false;
+    bool set_cruise_mode = false;
+    bool set_fly_head = false;
+    bool set_fly_height = false;
 };
 
 /**
- * 出站截断矩阵（Q/R2 裁决）：
- *   auto     : 两路都不发（初始态与失效安全态）
- *   setpoint : 仅 Setpoint 路（**不发** set_cruise_mode）
- *   cruise   : 仅 Guidance 路（并由边沿另发一次 set_cruise_mode）
+ * 透传映射表：
+ *   auto     : 全 false（失效安全：不出网）
+ *   setpoint : fly_point
+ *   guidance : set_cruise_mode + set_fly_head + set_fly_height（三条同频发出）
  */
-bool isChannelEnabled(CruiseMode mode, OutChannel channel);
+OutboundPlan outboundPlan(NavMode mode);
 
-/// 模式跃迁是否需要上发一次 set_cruise_mode（进入 cruise 的边沿）
-bool needsCruiseModeCommand(CruiseMode previous, CruiseMode current);
+/// 便捷判定（等价于 outboundPlan(mode) 的对应字段）
+bool forwardsSetpoint(NavMode mode);
+bool forwardsGuidance(NavMode mode);
 
 }  // namespace ros_mqtt_bridge

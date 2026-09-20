@@ -545,8 +545,8 @@ std::vector<Waypoint> BeamDubins::build_path(const BeamNode& node) const
     while (cur != nullptr) {
         if (!cur->branch.empty()) {
             segments.push_back(cur->branch);
-        } else {
-            // 叶节点或根节点：用 pos 构造单点
+        } else if (cur->parent_idx >= 0) {
+            // 非根节点的空分支（叶节点 / 未展开节点）：用 pos 构造单点
             Waypoint pp;
             pp.x     = cur->pos.x;
             pp.y     = cur->pos.y;
@@ -556,6 +556,12 @@ std::vector<Waypoint> BeamDubins::build_path(const BeamNode& node) const
             pp.curvature = 0.0;
             segments.push_back({pp});
         }
+        // 根节点（parent_idx < 0）：branch 必为空，但其 pos 已被第一段基元的首点覆盖
+        //（extend() 里 child.branch = prim.waypoints，而 waypoints[0] 就是父节点位置），
+        // 故此处**不补点**。否则路径首部会出现两个完全重合、curvature = 0 的点，
+        // 使下游 uav_guide 的 first_zero_curvature 取样规则恒命中 index 0，
+        // heads 退化为“当前航向”→ 计划里的圆弧永远不会被执行（飞机直飞）。
+        // 若整条链无任何基元（仅根节点），返回空路径，由调用方按“无解”处理。
 
         if (cur->parent_idx < 0) {
             break;  // 到达根节点

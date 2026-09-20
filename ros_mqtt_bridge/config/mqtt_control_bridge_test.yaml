@@ -13,18 +13,10 @@
       dry_run: false
 
     topics:
-      mode_state: aoa/uav/set_cruise_mode
+      nav_mode: aoa/uav/nav_mode
       setpoint: aoa/uav/setpoint
       guidance: aoa/uav/guidance
       uav_state: aoa/uav/state
-      tracking_mode: aoa/uav/tracking_mode
 
     cmd:
       height_type: 0
-      min_interval_s: 1.0
-      heading_eps_deg: 1.0
-      height_eps_m: 0.5
-      resend_cruise_mode_s: 0.0
-      require_mode: true
-      mode_timeout_s: 0.0
-      set_fly_speed_enabled: false

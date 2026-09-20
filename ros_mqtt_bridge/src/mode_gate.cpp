@@ -1,6 +1,6 @@
 /**
  * @file mode_gate.cpp
- * @brief 制导模式解析与出站截断矩阵实现
+ * @brief 导航模式解析与出站透传映射表实现
  */
 
 #include "ros_mqtt_bridge/mode_gate.h"
@@ -23,44 +23,59 @@ std::string lowerTrim(std::string s)
 
 }  // namespace
 
-bool parseCruiseMode(const std::string& raw, CruiseMode& out)
+bool parseNavMode(const std::string& raw, NavMode& out)
 {
     const std::string s = lowerTrim(raw);
     if (s == "auto") {
-        out = CruiseMode::Auto;
+        out = NavMode::Auto;
         return true;
     }
     if (s == "setpoint") {
-        out = CruiseMode::Setpoint;
+        out = NavMode::Setpoint;
         return true;
     }
-    if (s == "cruise") {
-        out = CruiseMode::Cruise;
+    if (s == "guidance") {
+        out = NavMode::Guidance;
         return true;
     }
     return false;
 }
 
-const char* cruiseModeName(CruiseMode mode)
+const char* navModeName(NavMode mode)
 {
     switch (mode) {
-        case CruiseMode::Setpoint: return "setpoint";
-        case CruiseMode::Cruise: return "cruise";
-        case CruiseMode::Auto:
+        case NavMode::Setpoint: return "setpoint";
+        case NavMode::Guidance: return "guidance";
+        case NavMode::Auto:
         default: return "auto";
     }
 }
 
-bool isChannelEnabled(CruiseMode mode, OutChannel channel)
+OutboundPlan outboundPlan(NavMode mode)
 {
-    if (mode == CruiseMode::Auto) return false;
-    if (mode == CruiseMode::Setpoint) return channel == OutChannel::Setpoint;
-    return channel == OutChannel::Guidance;   // CruiseMode::Cruise
+    OutboundPlan plan;
+    switch (mode) {
+        case NavMode::Setpoint:
+            plan.fly_point = true;
+            break;
+        case NavMode::Guidance:
+            plan.set_cruise_mode = true;
+            plan.set_fly_head = true;
+            plan.set_fly_height = true;
+            break;
+        case NavMode::Auto:
+        default:
+            break;   // 失效安全：不出网
+    }
+    return plan;
 }
 
-bool needsCruiseModeCommand(CruiseMode previous, CruiseMode current)
+bool forwardsSetpoint(NavMode mode) { return outboundPlan(mode).fly_point; }
+
+bool forwardsGuidance(NavMode mode)
 {
-    return current == CruiseMode::Cruise && previous != CruiseMode::Cruise;
+    const OutboundPlan plan = outboundPlan(mode);
+    return plan.set_cruise_mode || plan.set_fly_head || plan.set_fly_height;
 }
 
 }  // namespace ros_mqtt_bridge

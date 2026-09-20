@@ -191,6 +191,36 @@ TEST(DubinsPathTest, BestPath) {
     EXPECT_GE(path.size(), 3u);   // 至少 3 个点（弧1+直线+弧2）
 }
 
+// 回归：sample_path 必须为每个点填写 curvature（弧 = ±1/R，直线 = 0）。
+// 历史 Bug：curvature 被恒置 0 → 下游 uav_guide 把整条路径当直线，
+//           guidance 的 first_zero_curvature 采样规则永远命中最近点（≈当前航向），
+//           飞机只会直飞、永不进入圆弧段。
+TEST(DubinsPathTest, CurvatureFilledOnArcsAndZeroOnStraight) {
+    const double R = 250.0;
+    DubinsPath3D dubins(R, 0.087266, 5.0);
+
+    // 起点向东、终点向北 → 最短路径必为"弧 + 直 + 弧"，且直线段非零长度
+    double start[5] = {0.0, 0.0, 100.0, 0.0, 0.0};
+    double goal[5]  = {1000.0, 0.0, 100.0, M_PI / 2.0, 0.0};
+
+    std::vector<Waypoint> path;
+    ASSERT_GT(dubins.best_path(start, goal, path), 0.0);
+    ASSERT_GE(path.size(), 3u);
+
+    std::size_t n_arc = 0, n_line = 0;
+    for (const auto& p : path) {
+        const double k = std::abs(p.curvature);
+        if (k > 1e-9) {
+            ++n_arc;
+            EXPECT_NEAR(k, 1.0 / R, 1e-9) << "弧上曲率应为 1/R";
+        } else {
+            ++n_line;
+        }
+    }
+    EXPECT_GT(n_arc, 0u)  << "圆弧段必须带非零曲率";
+    EXPECT_GT(n_line, 0u) << "直线段曲率应为 0";
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 测试4：基元生成
 // ═══════════════════════════════════════════════════════════════
@@ -345,6 +375,55 @@ TEST(BeamSearchTest, ChannelObstacles) {
         }
     }
     EXPECT_TRUE(passes_channel) << "路径应穿过通道（y∈[2450,2550], x∈[2000,4000]）";
+}
+
+// 回归：整条路径首点不得与次点重合，且首段圆弧点必须带非零曲率。
+// 历史 Bug：build_path() 给根节点额外补了一个 curvature = 0 的合成点，与第一段基元
+//           的首点（同一位置）完全重合，使 uav_guide 的 first_zero_curvature 规则恒命中
+//           index 0 → heads 取"当前航向"，计划里的圆弧永远不会被执行（飞机直飞）。
+// 构造：max_depth = 1 + dubins_shot_interval = 1 ⇒ 结果恒为 build_path(根) + final-shot。
+TEST(BeamSearchTest, NoDuplicateStartPointAndArcCurvatureFilled) {
+    const double R = 250.0;
+    DubinsPath3D dubins(R, 0.087266, 5.0);
+
+    BeamConfig cfg;
+    cfg.max_depth = 1;               // 只走一层 ⇒ 路径 = 根节点段 + 直达 Dubins
+    cfg.max_extend_length = 200.0;
+    cfg.min_extend_length = 100.0;
+    cfg.goal_tolerance_xy = 50.0;
+
+    double start[5] = {0.0, 0.0, 100.0, 0.0, 0.0};            // 向东
+    double goal[5]  = {1200.0, 900.0, 100.0, M_PI / 2.0, 0.0}; // 向北 ⇒ 首段必为圆弧
+
+    BeamDubins planner(nullptr, dubins, start, goal, cfg);
+
+    std::vector<Waypoint> path;
+    std::vector<BeamNode> all_nodes;
+    ASSERT_LT(planner.search(path, all_nodes), INFINITY);
+    ASSERT_GE(path.size(), 3u);
+
+    // 1) 路径起点即本机位置
+    EXPECT_NEAR(path.front().x, start[0], 1e-6);
+    EXPECT_NEAR(path.front().y, start[1], 1e-6);
+
+    // 2) 首两点不得重合
+    const double d01 = std::hypot(path[1].x - path[0].x, path[1].y - path[0].y);
+    EXPECT_GT(d01, 1e-6) << "路径首两点重合（根节点合成点未去除）";
+
+    // 3) 首段是圆弧 ⇒ 首点曲率必须是 ±1/R
+    EXPECT_NEAR(std::abs(path[0].curvature), 1.0 / R, 1e-9) << "首段圆弧点曲率未填写";
+
+    // 4) 关键回归：first_zero_curvature 规则不得命中 index 0
+    const double eps = 1e-4;
+    std::size_t first_zero = path.size();
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        if (std::abs(path[i].curvature) <= eps) {
+            first_zero = i;
+            break;
+        }
+    }
+    EXPECT_GT(first_zero, 0u) << "首个零曲率点不应是路径起点（否则 heads 退化为当前航向）";
+    EXPECT_LT(first_zero, path.size()) << "整条路径不应全为圆弧（应有直线段）";
 }
 
 // ═══════════════════════════════════════════════════════════════

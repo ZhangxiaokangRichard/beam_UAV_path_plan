@@ -1,8 +1,16 @@
 # beam_UAV_path_plan 2.0 · Quick Start（架构 / 分节点测试 / 启动流程）
 
 > 适用版本：**2.0.0（ROS2 Humble）**，基线上游 ROS1 Noetic 1.0.1（commit `87615c5`）。
-> 详细设计与逐阶段验收记录见 [`ros2rebuild.md`](ros2rebuild.md)。
-> 本文所有命令与实测数值均在 **2026-09-18 现场环境**（Ubuntu 22.04 + Humble + 真机 broker）验证通过。
+> 详细设计与逐阶段验收记录见 [`ros2rebuild.md`](ros2rebuild.md)（架构修订见其**附录 G**）。
+> 本文命令与实测数值均在现场环境（Ubuntu 22.04 + Humble + 真机 broker）验证通过：
+> **2026-09-18** 分节点验收（T1–T9）、**2026-09-20** 架构修订（模式改状态 + 出站改纯翻译）后复测。
+>
+> **2026-09-20 修订要点**（与早期 2.0 设计的差异，下文已全部同步）：
+> ① 模式取值为 `auto` / `setpoint` / `guidance`（**`cruise` 已弃用、不做别名兼容**），入口 MQTT
+>   `aoa/ai_guide/nav/mode` → ROS `aoa/uav/nav_mode`（纯字符串，latched）；
+> ② `mqtt_control_bridge` 是**纯翻译器**：不节流、不去抖、不做时间戳去重；
+> ③ `set_cruise_mode` 与 `set_fly_head`/`set_fly_height` **同频 5 Hz** 逐帧发出（不再边沿触发）；
+> ④ 两个制导节点均为**严格 5 Hz** 单一定时器（`publish_rate_hz`，无“变化触发”补发）。
 
 ---
 
@@ -35,7 +43,7 @@ sudo apt install -y ros-humble-rviz2 ros-humble-tf2-ros ros-humble-tf2-geometry-
 |---|---|---|---|
 | `beam_dubins` | ament_cmake / C++17 | 束搜索规划 + Dubins 原语；**算法层与 1.0.1 逐字节一致** | `planner_server` |
 | `uav_guide` | ament_cmake / C++17 | 拦截状态机、路径切分、引导点、巡航制导；**算法层零 ROS** | `uav_guide_loop_node`、`uav_guide_point_node`、`uav_guidance_node` |
-| `ros_mqtt_bridge` | ament_cmake / C++17 + libmosquitto | MQTT 入站位姿、出站模式截断、任务启停编排；**库层零 ROS** | `mqtt_target_bridge`、`mqtt_control_bridge`、`mqtt_mssn_bridge` |
+| `ros_mqtt_bridge` | ament_cmake / C++17 + libmosquitto | MQTT 入站位姿、模式状态桥、出站**透传翻译**、任务启停编排；**库层零 ROS** | `mqtt_target_bridge`、`mqtt_control_bridge`、`mqtt_mssn_bridge` |
 | `uav_guide_env` | ament_cmake / C++17 | 仅可视化（1.0.1 仿真闭环已移除） | `uav_viz_node` + rviz2 |
 
 **零 ROS 库**（可离线单测、可复用）：
@@ -54,9 +62,9 @@ nm -uC build/ros_mqtt_bridge/libros_mqtt_bridge_core.a | grep -cE 'rclcpp|rosidl
 | `planner_server` | — | 服务 `aoa/beam_dubins/plan_path`（`beam_dubins/srv/PlanPath`） |
 | `uav_guide_loop_node` | `aoa/uav/state`、`aoa/target/state`、`aoa/uav/intercept_mode_cmd` | `aoa/uav/planed_path`(latched)、`aoa/uav/intercept_mode`、`aoa/uav/tracking_mode`(1 Hz 心跳)；客户端 `aoa/beam_dubins/plan_path` |
 | `uav_guide_point_node` | `aoa/uav/planed_path`、`aoa/uav/state`、`aoa/target/state`、`aoa/uav/intercept_mode` | `aoa/uav/setpoint`（5 Hz，**不判模式**） |
-| `uav_guidance_node` | `aoa/uav/planed_path`、`aoa/uav/state`、`aoa/target/state` | `aoa/uav/guidance`（1 Hz + 变化触发，**不判模式**） |
-| `mqtt_control_bridge` | `aoa/uav/set_cruise_mode`、`aoa/uav/setpoint`、`aoa/uav/guidance`、`aoa/uav/state` | MQTT `aoa/uav_control/${uav_sn}/event_services` |
-| `mqtt_mssn_bridge` | MQTT `aoa/ai_guide/set_cruise_mode`、`aoa/ai_guide/nav/cmd`、`aoa/ai_guide/guide/cmd` | ROS `aoa/uav/set_cruise_mode`(latched)；MQTT `aoa/ai_guide/{nav,guide}/status`；**启停** `uav_guide_launch.py` 与 `mqtt_control_bridge` |
+| `uav_guidance_node` | `aoa/uav/planed_path`、`aoa/uav/state`、`aoa/target/state` | `aoa/uav/guidance`（**严格 5 Hz** 单一定时器，不判模式） |
+| `mqtt_control_bridge` | `aoa/uav/nav_mode`、`aoa/uav/setpoint`、`aoa/uav/guidance`、`aoa/uav/state` | MQTT `aoa/uav_control/${uav_sn}/event_services`（**纯翻译器**，无节流） |
+| `mqtt_mssn_bridge` | MQTT `aoa/ai_guide/nav/mode`、`aoa/ai_guide/nav/cmd`、`aoa/ai_guide/guide/cmd` | ROS `aoa/uav/nav_mode`（`std_msgs/String` 纯模式名，latched）；MQTT `aoa/ai_guide/{nav,guide}/status`；**启停** `uav_guide_launch.py` 与 `mqtt_control_bridge` |
 | `uav_viz_node` | `aoa/uav/state`、`aoa/target/state`、`aoa/uav/planed_path`、`aoa/viz/status_text` | `aoa/viz/*`（Marker、`nav_msgs/Path`） |
 
 ### 1.3 数据流
@@ -71,9 +79,9 @@ flowchart LR
     LOOP -->|aoa/uav/planed_path| PT[uav_guide_point_node]
     LOOP -->|aoa/uav/planed_path| GD[uav_guidance_node]
     PT -->|aoa/uav/setpoint 5Hz| CB[mqtt_control_bridge]
-    GD -->|aoa/uav/guidance 1Hz| CB
-    B -->|aoa/ai_guide/set_cruise_mode| MB[mqtt_mssn_bridge]
-    MB -->|aoa/uav/set_cruise_mode| CB
+    GD -->|aoa/uav/guidance 5Hz| CB
+    B -->|aoa/ai_guide/nav/mode| MB[mqtt_mssn_bridge]
+    MB -->|aoa/uav/nav_mode latched| CB
     MB -.->|启停| LOOP
     MB -.->|启停| CB
     CB -->|"fly_point / set_cruise_mode / set_fly_head / set_fly_height"| B
@@ -81,20 +89,23 @@ flowchart LR
     LOOP --> VIZ[uav_viz_node + rviz2]
 ```
 
-### 1.4 模式与出站截断（2.0 核心行为）
+### 1.4 模式与出站透传（2.0 核心行为）
 
-模式权威源 = MQTT `aoa/ai_guide/set_cruise_mode`（取值 `auto` / `setpoint` / `cruise`），
-由 `mqtt_mssn_bridge` 转为 ROS 镜像 `aoa/uav/set_cruise_mode`。
+模式是**状态**而不是边沿：MQTT `aoa/ai_guide/nav/mode`（`auto` / `setpoint` / `guidance`）
+→ `mqtt_mssn_bridge` → ROS `aoa/uav/nav_mode`（`std_msgs/String`，**latched**，启动即可得当前模式）
+→ `mqtt_control_bridge` 按下表 **1:1 翻译**（不节流、不去抖、不做时间戳去重）。
 
-| 模式 | `fly_point`（← `aoa/uav/setpoint`） | `set_fly_head` + `set_fly_height`（← `aoa/uav/guidance`） | `set_cruise_mode` |
-|---|---|---|---|
-| `auto` | ✗ 不出网 | ✗ 不出网 | ✗ |
-| `setpoint` | ✓ | ✗ | ✗ |
-| `cruise` | ✗ | ✓（≥1 Hz 限流 + 阈值去抖） | 进入 `cruise` 的**跃迁边沿发 1 次** |
+| 模式 | 上游 ROS 话题 | 出网 MQTT（逐帧翻译） |
+|---|---|---|
+| `auto` | — | 不出网（失效安全，节点启动默认值） |
+| `setpoint` | `aoa/uav/setpoint`（5 Hz） | `fly_point`（5 Hz） |
+| `guidance` | `aoa/uav/guidance`（5 Hz） | `set_cruise_mode` + `set_fly_head` + `set_fly_height`（各 5 Hz，同一帧**成组**发出） |
 
-- 两个制导节点**始终发布**，模式互斥完全下沉到 `mqtt_control_bridge`（便于单测与复用）。
-- 失效安全：MQTT 断线 / 模式报文非法 / `${uav_sn}` 未知 → 一律不出网（等价 `auto`）。
-- 回退开关：`cmd.require_mode: false` = 直通模式（始终按 `setpoint` 发 `fly_point`，即 1.0.1 行为）。
+- 两个制导节点**始终严格 5 Hz 发布**（`publish_rate_hz`），模式选择完全下沉到 `mqtt_control_bridge`。
+- **出站频率 == 上游 ROS 频率**：实测 guidance 5.000 Hz（σ 0.29 ms）→ 三个 MQTT 话题各 5 Hz（合计 15 msg/s）。
+- 命名不对称：MQTT 模式值用 `guidance`，而协议方法名仍是 **`set_cruise_mode`**（协议 4.4.17 固定）。
+- 失效安全：模式未收到（默认 `auto`）/ 模式报文非法 / `${uav_sn}` 未知 → 不出网。
+- 模式生效延迟（MQTT 入站 → 控制桥应用）实测 ≈ **0.6 ms**（两者同机，latched 话题直传）。
 
 ### 1.5 坐标系铁律（现场最容易出错的地方）
 
@@ -133,7 +144,7 @@ g++ -std=c++17 -O2 /tmp/geodesy_check.cpp \
 | 文件 | 关键项 |
 |---|---|
 | `ros_mqtt_bridge/config/mqtt_bridge.yaml` | `mqtt.host/port`、`geodesy.origin_*`、`target_uav_filter: SIL`、`own_uav_filter: NOCON`、`topics.*`、`tf.world_frame: map` |
-| `ros_mqtt_bridge/config/mqtt_control_bridge.yaml` | `mqtt.event_services_template`、`cmd.height_type/min_interval_s/heading_eps_deg/height_eps_m/require_mode/mode_timeout_s`、`mqtt.dry_run` |
+| `ros_mqtt_bridge/config/mqtt_control_bridge.yaml` | `mqtt.event_services_template`、`topics.nav_mode/setpoint/guidance/uav_state`、`cmd.height_type`、`mqtt.dry_run`（**无节流参数**：纯翻译器） |
 | `ros_mqtt_bridge/config/mqtt_mssn_bridge.yaml` | `mqtt.*_cmd_topic/status_topic`、`mssn.enable_process_control/workspace_dir/setup_shell/nav_launch_command/guide_run_command/*_pgrep_pattern/log_dir`、`mssn.start_guide_on_mode` |
 | `uav_guide/config/uav_guide.yaml` | `geodesy.origin_*`（**同上**）、`target.approach_distance_*`、`guidance.*`、`space.*`、`finalshot.*`、`guide_point.publish_rate_hz` |
 | `beam_dubins/config/beam_dubins.yaml` | `service_name`、`beam_width`、`scorer.w_h`、`uav.min_turn_radius_m` |
@@ -256,10 +267,10 @@ ros2 topic echo --once aoa/uav/setpoint
 > 判定要点：把 `target_longitude/latitude` 用 T1 的 Python 实现反算回 ENU（或直接看是否偏离目标数公里以上），
 > 若偏移量 ≈ 「新旧原点之差」则说明**两个 yaml 的原点不一致**。
 
-### T5 `uav_guidance_node`（cruise 制导 → `aoa/uav/guidance`）
+### T5 `uav_guidance_node`（guidance 制导 → `aoa/uav/guidance`）
 
 ```bash
-ros2 topic hz aoa/uav/guidance         # 1 Hz 基准 + 变化触发（实测 2.5~3.7 Hz）
+ros2 topic hz aoa/uav/guidance         # 严格 5 Hz（实测 5.000 Hz，min 0.199 / max 0.201 s，σ 0.29 ms）
 ros2 topic echo --once aoa/uav/guidance
 grep -a 'heads=' <终端输出>
 ```
@@ -273,6 +284,9 @@ grep -a 'heads=' <终端输出>
 |---|---|---|---|
 | heads | 110.64° | 110.64° | **0.000°** |
 | fly_height | 197.5 m | 197.5 m | **0.000 m** |
+
+频率（2026-09-20 改造后）：**平均 5.000 Hz，min 0.199 s / max 0.201 s，σ = 0.29 ms**
+（改造前为“1 Hz 心跳 + 路径到达变化触发”双路径，实测 2.5~3.7 Hz 且存在成对突发）。
 
 判定：`heads ∈ [0,360)`、与复算逐位一致；日志无 `tf2 ... failed`（见故障排查 §5）。
 
@@ -313,18 +327,19 @@ ros2 launch ros_mqtt_bridge mqtt_mssn_bridge.launch.py enable_process_control:=f
 ```bash
 # 另开终端观察
 mosquitto_sub -h 192.168.70.62 -t 'beam_test/#' -v
-# 注入模式
-mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/set_cruise_mode' -m '{"mode":"cruise"}'
-# ROS 镜像
-ros2 topic echo --once aoa/uav/set_cruise_mode
+# 注入模式（auto | setpoint | guidance；也可带 JSON 包裹 {"mode":"guidance"}）
+mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/nav/mode' -m '{"mode":"guidance"}'
+# ROS 镜像（纯模式名）
+ros2 topic echo --once aoa/uav/nav_mode
 ```
 
 实测基线：
 
 | 检查项 | 期望 | 实测 |
 |---|---|---|
-| 模式镜像 | ROS `aoa/uav/set_cruise_mode` 随 MQTT 变化 | ✓ `auto→cruise` |
-| 状态上报 | `beam_test/ai_guide/nav/status`、`guide/status` | ✓ `{"running":false,"mode":"cruise","tracking":false}` |
+| 模式镜像 | ROS `aoa/uav/nav_mode` 随 MQTT 变化（纯字符串） | ✓ 启动 `auto` → `guidance` → `setpoint` |
+| 入站容错 | 纯字符串与 `{"mode":...}` 均可 | ✓ 两者均正确解析 |
+| 状态上报 | `beam_test/ai_guide/nav/status`、`guide/status` | ✓ `{"running":false,"mode":"guidance"}` |
 | `enable_process_control:=false` | 拒绝启停并 WARN | ✓ `process control disabled, nav ignored` |
 
 **再验证真实启停**（安全做法：用测试配置 + 不接真机的量）：
@@ -342,32 +357,54 @@ mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/guide/cmd' -m '{"start":fa
 实测基线：`nav start` → `install/uav_guide/lib` 下 3 个进程；`guide start` → 1 个进程；
 `{"start":false}` → 约 0.2 s 内 `group cleared`、残留 0、桥自身存活。
 
-### T8 `mqtt_control_bridge`（出站截断）
+### T8 `mqtt_control_bridge`（出站**纯翻译**）
 
 **必须用沙箱配置**（出站落到 `beam_test/uav_control/<sn>/event_services`）：
 
 ```bash
 ros2 launch ros_mqtt_bridge mqtt_control_bridge.launch.py \
   config:=$PWD/install/ros_mqtt_bridge/share/ros_mqtt_bridge/config/mqtt_control_bridge_test.yaml
-# 观察出网
-mosquitto_sub -h 192.168.70.62 -t 'beam_test/#' -v
-# 切换模式（经 mssn_bridge 镜像）
-mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/set_cruise_mode' -m '{"mode":"setpoint"}'
-mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/set_cruise_mode' -m '{"mode":"cruise"}'
+# 带时间戳观察出网（便于算频率）
+mosquitto_sub -h 192.168.70.62 -t 'beam_test/#' -F '%I|%t|%p'
+# 切换模式（经 mssn_bridge）
+mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/nav/mode' -m '{"mode":"setpoint"}'
+mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/nav/mode' -m '{"mode":"guidance"}'
 ```
 
-实测基线（真实制导数据驱动，2026-09-18）：
+实测基线（真实制导数据驱动，各阶段 12 s，2026-09-20）：
 
-| 阶段 | 期望 | 实测 |
+| 阶段 | 期望 | 实测（逐帧 1:1） |
 |---|---|---|
-| `auto`（8 s） | 零出网 | **0 条** |
-| `setpoint`（9 s） | 仅 `fly_point` | **45 条**（= 9 s × 5 Hz，逐个新引导点下发） |
-| `cruise`（~26 s） | `set_cruise_mode`(1) + head/height | **1 + 20 + 20**（≈1 Hz 限流） |
+| `auto` | 零出网 | **0 条** |
+| `setpoint` | 仅 `fly_point`，5 Hz | **57 条**（= 12 s × 5 Hz，边界秒量化差 3） |
+| `guidance` | `set_cruise_mode` + `set_fly_head` + `set_fly_height` 各 5 Hz | **57 + 57 + 57 = 171 条**（≡ 15 msg/s，三法完全等量） |
+| 成组顺序 | 每帧 `set_cruise_mode → set_fly_head → set_fly_height` | ✓ 按 tick 成组（54 组连发） |
+| 模式生效延迟 | — | **0.575 ms**（mssn 收到 → 控制桥应用） |
 | 出网话题 | 仅沙箱话题 | `beam_test/uav_control/V2.4AOACRAFT-NOCONF0/event_services` |
 | `fly_point` 数值 | 与真实目标同量级 | lon 104.8651 / lat 31.6100 / alt 700.2 / radius 500.0（距真实目标 1.75 km） |
 | `set_fly_height` | `height` 取整、`height_type` 可配 | `{"height":200,"height_type":0}` |
 
+> 注：抓包用的 `%I` 时间戳只有**秒级精度**，因此模式切换所在的那一秒会表现为上一模式多算 3 条/本模式少 3 条；三个方法**计数完全相等**（57/57/57）已证明 1:3 转译无遗漏、无节流。
+
 > `dry_run` 开关：`ros2 launch … mqtt_control_bridge.launch.py dry_run:=true` 只打印不外发，最安全的联调方式。
+
+#### T8b 生产链路实测（真实飞控话题，2026-09-20）
+
+用**生产配置**（非沙箱）全链路跑一次，下发对象由 `aoa/uav/state.child_frame_id` 自动定为
+`V2.4AOACRAFT-NOCONF0`，注入模式后抓真实出网话题 `aoa/uav_control/V2.4AOACRAFT-NOCONF0/event_services`：
+
+| 阶段 | 期望 | 实测 |
+|---|---|---|
+| `auto`（12 s） | 零出网 | **0 条** |
+| `setpoint`（10 s） | 仅 `fly_point` @5 Hz | **49 条**（4.90/s） |
+| `guidance`（10 s） | 三条各 5 Hz | **49 + 48 + 48 = 145 条**（14.60/s） |
+| 成组 | 每帧 cruise→head→height | ✓ **50 组**连续，顺序固定 |
+| `auto` 回升（6 s） | 回到零出网 | 只剩切换瞬间 2~3 条，之后 **0** |
+| `set_fly_height` | 取整 + `height_type` | `199~203`，`height_type=0` |
+| `fly_point` | 与真实目标同量级 | lon 104.8836 / lat 31.6099 / alt 700.2 / radius 500.0 |
+
+> 注入命令（生产话题）：`mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/nav/mode' -m '{"mode":"guidance"}'`；
+> 收尾务必再注入 `{"mode":"auto"}` 回到零出网态。
 
 ### T9 launch 路径冒烟（推荐的正常启动方式）
 
@@ -377,7 +414,7 @@ ros2 launch uav_guide uav_guide_launch.py &          # 含 planner_server
 ros2 node list                                       # 应含 4 个节点 + planner_server
 ros2 topic hz aoa/uav/planed_path                    # 3.6 Hz
 ros2 topic hz aoa/uav/setpoint                       # 5.1 Hz
-ros2 topic hz aoa/uav/guidance                       # 3.7 Hz
+ros2 topic hz aoa/uav/guidance                       # 5.0 Hz
 ros2 service list | grep plan_path                   # /aoa/beam_dubins/plan_path
 ```
 
@@ -414,9 +451,8 @@ ros2 launch ros_mqtt_bridge mqtt_mssn_bridge.launch.py
 ros2 launch uav_guide_env viz.launch.py
 ```
 
-**顺序理由**：位姿桥最先（提供 `aoa/uav/state`、`aoa/target/state`）→ 规划/制导 → 出站桥（读取订阅的
-`setpoint`/`guidance`/模式）→ 模式桥（模式源）。出站桥先于 mssn_bridge 启动也没问题：
-mssn_bridge 启动时会以 `auto` 广播一次镜像（latched），控制桥收到即进入"不出网"态。
+**顺序理由**：位姿桥最先（提供 `aoa/uav/state`、`aoa/target/state`）→ 规划/制导 → 模式桥（提供 `aoa/uav/nav_mode`）→ 出站桥（按模式翻译）。
+出站桥先于 mssn_bridge 启动也没问题：控制桥默认 `auto`（不出网），mssn_bridge 启动时以 latched 广播当前模式，控制桥收到即切换。
 
 ### 4.2 现场任务流程（MQTT 远程编排）
 
@@ -436,8 +472,8 @@ ros2 launch ros_mqtt_bridge mqtt_mssn_bridge.launch.py
 mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/nav/cmd' -m '{"start":true}'
 # 启动出站控制桥
 mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/guide/cmd' -m '{"start":true}'
-# 切换模式（auto / setpoint / cruise；非 auto 时 mssn_bridge 会自动确保控制桥在线）
-mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/set_cruise_mode' -m '{"mode":"setpoint"}'
+# 切换模式（auto | setpoint | guidance；非 auto 时 mssn_bridge 会自动确保控制桥在线）
+mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/nav/mode' -m '{"mode":"setpoint"}'
 # 观察状态（1 Hz 上报）
 mosquitto_sub -h 192.168.70.62 -t 'aoa/ai_guide/+/status' -v
 # 停止
@@ -464,7 +500,9 @@ mosquitto_pub -h 192.168.70.62 -t 'aoa/ai_guide/nav/cmd'   -m '{"start":false}'
 1. **沙箱话题**：用 `config/mqtt_control_bridge_test.yaml`（出站 → `beam_test/uav_control/${uav_sn}/event_services`）
    与 `config/mqtt_mssn_bridge_test.yaml`（入站 → `beam_test/ai_guide/*`，且 `enable_process_control: false`）。
 2. **`dry_run`**：`ros2 launch ros_mqtt_bridge mqtt_control_bridge.launch.py dry_run:=true` 只打印不外发。
-3. **回退直通/关闭模式门控**：`cmd.require_mode:=false`（1.0.1 行为）——一般不建议在有真机时使用。
+3. **只让控制桥处于 `auto`**：不发模式消息即默认 `auto`（不出网）；或直接不发 `nav/mode` 只验证链路。
+
+> 已经没有"限流"需要关闭：出站是纯翻译，{频率由上游节点决定}，`min_interval_s` / 阈值参数已删除。
 
 完整沙箱联调脚本：
 
@@ -473,7 +511,7 @@ CFG=$PWD/install/ros_mqtt_bridge/share/ros_mqtt_bridge/config
 ros2 launch ros_mqtt_bridge mqtt_mssn_bridge.launch.py config:=$CFG/mqtt_mssn_bridge_test.yaml &
 ros2 launch ros_mqtt_bridge mqtt_control_bridge.launch.py config:=$CFG/mqtt_control_bridge_test.yaml &
 mosquitto_sub -h 192.168.70.62 -t 'beam_test/#' -v &
-mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/set_cruise_mode' -m '{"mode":"cruise"}'
+mosquitto_pub -h 192.168.70.62 -t 'beam_test/ai_guide/nav/mode' -m '{"mode":"guidance"}'
 ```
 
 ### 4.4 停止
@@ -505,8 +543,10 @@ pkill -f '[m]qtt_mssn_bridge'
 | 每秒 `tf2 map→aoa/uav_base_link failed ... fallback to topic` | `guidance.pose_source: tf2` 但 TF 子帧名是飞机 SN，不是 `aoa/uav_base_link` | 用 `pose_source: "topic"`（现场推荐，已设为默认）；或把 `uav_frame` 改成实际 SN |
 | `WARNING: topic [aoa/target/state] does not appear to be published yet` | 目标尚未上线（`uav_caster/uavs_information` 里没有匹配 `target_uav_filter` 的 sn，回退列表首项） | 确认目标在线与 `target_uav_filter` 取值 |
 | 服务 `aoa/beam_dubins/plan_path` 不可用 | `planner_server` 未启动 | 起 `ros2 launch uav_guide uav_guide_launch.py`（默认含 planner）或单独起 planner |
-| 模式切换后无任何出网 | 当前模式为 `auto`（设计如此：不发优于误发） | 先 `set_cruise_mode` 到 `setpoint`/`cruise`；检查 mssn_bridge 是否在跑（它是模式镜像源） |
-| `set_fly_head/height` 频率只有 ~1 Hz | `cmd.min_interval_s` 限流 + `heading_eps_deg`/`height_eps_m` 去抖 | 按需调小间隔/阈值；`fly_point` 不受此限流（沿用 1.0.1，逐点 5 Hz 下发） |
+| 模式切换后无任何出网 | 当前模式为 `auto`（设计如此：不发优于误发） | 先发 `aoa/ai_guide/nav/mode` → `setpoint`/`guidance`；检查 mssn_bridge 是否在跑（它提供 `aoa/uav/nav_mode`） |
+| 出网频率不是 5 Hz | ① 上游节点频率不是 5 Hz（查 `ros2 topic hz aoa/uav/{setpoint,guidance}`）；② 已不是纯翻译器（旧版存在 `min_interval_s` 限流，已删除） | 确保 `uav_guide.yaml` 的 `guide_point.publish_rate_hz` 与 `guidance.publish_rate_hz` 均为 5.0，且已 `colcon build` 重装配置 |
+| 模式话题改名后上位机不生效 | 入口已改为 MQTT `aoa/ai_guide/nav/mode`（取值 `auto`/`setpoint`/`guidance`），**不再兼容**旧名 `aoa/ai_guide/set_cruise_mode` 与旧值 `cruise` | 地面站同步改用新话题/新取值 |
+| `set_fly_head` 出现 `"heading":360.0` | 早期 `encodeSetFlyHead` **先取模后量化**：`359.96` 经 1 位小数四舍五入得到 `360.0`，超出协议约定的 `[0,360)`（现场抓包实测到过） | 已修为**归→量化→回绕**（`359.96 → 0.0`）；回归用例见 `test_json_codec.cpp::SetFlyHeadRangesAndRounding`。若仍出现请确认已 `colcon build` |
 | mssn_bridge 日志 `N untracked instance(s) already running, skip start` | 已有同名进程在跑（可能是手工启动的） | 先停止旧进程，或用 `nav_pgrep_pattern`/`guide_pgrep_pattern` 指定更精确的匹配串 |
 | 桥进程被误杀 / 无法启动子进程 | 早期版本用 `pgrep -f`/`pkill -f` 会**自我匹配** | 2.0 已改 `/proc` 扫描并排除「自身/同进程组/同会话」，不要回退到 shell 匹配 |
 | 改完 yaml 不生效 | 配置在 `install/` 有副本 | `colcon build --packages-select <pkg>` 重新安装 |
@@ -520,10 +560,12 @@ pkill -f '[m]qtt_mssn_bridge'
 | `aoa/uav/state`、`aoa/target/state` | 随飞机上报（≈2 Hz） | m（ENU）、rad |
 | `aoa/uav/planed_path` | ≈4~5 Hz（latched） | `PathPoint{x,y,z,yaw,pitch,curvature}`，m/rad/1/m |
 | `aoa/uav/setpoint` | 5 Hz | `target_longitude/latitude`(°) `target_altitude`(m) `target_radius`(m，符号=绕行方向) |
-| `aoa/uav/guidance` | 1 Hz + 变化触发 | `heads`(°)∈[0,360) `fly_height`(m) `fly_speed`(m/s) |
+| `aoa/uav/guidance` | **严格 5 Hz**（单一定时器，实测 5.000 Hz / σ 0.29 ms） | `heads`(°)∈[0,360) `fly_height`(m) `fly_speed`(m/s) |
+| `aoa/uav/nav_mode` | 模式变化时（latched，启动即得） | `std_msgs/String`：`auto` / `setpoint` / `guidance` |
 | `aoa/uav/tracking_mode` | 1 Hz 心跳 | bool |
-| 出站 `set_fly_head` / `set_fly_height` | ≥1 s 间隔 + 阈值去抖 | ° / m（取整）+ `height_type`(0 场高/1 绝对) |
-| 出站 `fly_point` | 每个新引导点（≈5 Hz） | °(7 位小数) / m |
+| 出站 `set_cruise_mode` | **与 guidance 同频（5 Hz）** | `data: {}`（协议 4.4.17；不再边沿触发） |
+| 出站 `set_fly_head` / `set_fly_height` | **与 guidance 同频（5 Hz）** | ° / m（取整）+ `height_type`(0 场高/1 绝对) |
+| 出站 `fly_point` | 与 setpoint 同频（5 Hz） | °(7 位小数) / m |
 | `aoa/ai_guide/{nav,guide}/status` | 1 Hz（可配 `status_poll_hz`） | `{"running":bool,"mode":...}` |
 
 ---
@@ -539,12 +581,15 @@ ros2 topic info <topic> -v      # 查 QoS（planed_path 为 transient_local/latc
 ```
 
 ROS 侧：`aoa/uav/state`、`aoa/target/state`、`aoa/uav/planed_path`、`aoa/uav/setpoint`、
-`aoa/uav/guidance`、`aoa/uav/intercept_mode`、`aoa/uav/intercept_mode_cmd`、`aoa/uav/tracking_mode`、
-`aoa/uav/set_cruise_mode`、`aoa/viz/*`（10 个）、服务 `aoa/beam_dubins/plan_path`。
+`aoa/uav/guidance`、`aoa/uav/nav_mode`（`std_msgs/String`，latched）、
+`aoa/uav/intercept_mode`、`aoa/uav/intercept_mode_cmd`、`aoa/uav/tracking_mode`、
+`aoa/viz/*`（10 个）、服务 `aoa/beam_dubins/plan_path`。
 
 MQTT 侧：
-入站 `aoa/uav_center/+/uav_info`、`uav_caster/uavs_information`、`aoa/uav_center/fst_info`、`aoa/ai_guide/{set_cruise_mode,nav/cmd,guide/cmd}`；
-出站 `aoa/uav_control/${uav_sn}/event_services`、`aoa/ai_guide/{nav,guide}/status`。
+入站 `aoa/uav_center/+/uav_info`、`uav_caster/uavs_information`、`aoa/uav_center/fst_info`、
+`aoa/ai_guide/{nav/mode,nav/cmd,guide/cmd}`；
+出站 `aoa/uav_control/${uav_sn}/event_services`（method：`fly_point` / `set_cruise_mode` /
+`set_fly_head` / `set_fly_height`）、`aoa/ai_guide/{nav,guide}/status`。
 
 ### 7.2 启动检查清单
 
@@ -555,5 +600,6 @@ MQTT 侧：
 - [ ] `own_uav_filter` / `target_uav_filter` 与在线飞机 SN 匹配
 - [ ] 双机在 `space.lx × ly` 作业区内（ENU 数值 < 10 km）
 - [ ] 模式初值为 `auto`（不出网）；下单前确认目标模式
+- [ ] 模式注入走 MQTT `aoa/ai_guide/nav/mode`（`auto`/`setpoint`/`guidance`）
 - [ ] 有真机在线时，出站操作走沙箱配置或 `dry_run:=true`
 - [ ] 收工后 `pkill` 清理残留进程（尤其 mssn_bridge 拉起的 setsid 子进程）

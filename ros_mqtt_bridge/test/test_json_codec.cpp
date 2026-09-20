@@ -123,6 +123,18 @@ TEST(JsonCodec, SetFlyHeadRangesAndRounding)
               std::string::npos);
     EXPECT_NE(ros_mqtt_bridge::encodeSetFlyHead(-10.0, gen.next()).find("\"heading\":350.0"),
               std::string::npos);
+
+    // 量化回绕：359.96 不得舍入成 360.0（超出 [0,360)）；359.94 应保留 359.9
+    EXPECT_NE(ros_mqtt_bridge::encodeSetFlyHead(359.96, gen.next()).find("\"heading\":0.0"),
+              std::string::npos);
+    EXPECT_EQ(ros_mqtt_bridge::encodeSetFlyHead(359.96, gen.next()).find("360.0"),
+              std::string::npos) << "heading 不得出现 360.0";
+    EXPECT_NE(ros_mqtt_bridge::encodeSetFlyHead(359.94, gen.next()).find("\"heading\":359.9"),
+              std::string::npos);
+    EXPECT_NE(ros_mqtt_bridge::encodeSetFlyHead(360.0, gen.next()).find("\"heading\":0.0"),
+              std::string::npos);
+    EXPECT_NE(ros_mqtt_bridge::encodeSetFlyHead(-0.04, gen.next()).find("\"heading\":0.0"),
+              std::string::npos);
 }
 
 TEST(JsonCodec, SetFlyHeightRoundsAndCarriesType)

@@ -10,19 +10,14 @@
       # true = 只打印不发（联调/离线测试用）
       dry_run: false
 
+    # ── 纯翻译器：不节流、不去抖，出站频率 == 上游 ROS 话题频率 ──
     topics:
-      mode_state: aoa/uav/set_cruise_mode      # 模式权威源（由 mqtt_mssn_bridge 转入）
-      setpoint: aoa/uav/setpoint               # 指点通道 → fly_point
-      guidance: aoa/uav/guidance               # 巡航通道 → set_fly_head + set_fly_height
-      uav_state: aoa/uav/state                 # 取 uav_sn（child_frame_id）
-      tracking_mode: aoa/uav/tracking_mode     # 仅日志指示
+      nav_mode: aoa/uav/nav_mode      # 当前导航模式状态（auto|setpoint|guidance），latched
+      setpoint: aoa/uav/setpoint       # setpoint 模式 → fly_point（5 Hz）
+      guidance: aoa/uav/guidance       # guidance 模式 → set_cruise_mode + set_fly_head +
+                                       #                set_fly_height（各 5 Hz）
+      uav_state: aoa/uav/state         # 取 uav_sn（child_frame_id）
 
+    # 映射表：auto → 不出网；setpoint → fly_point；guidance → 三条同频
     cmd:
-      height_type: 0            # 0 场高 / 1 绝对高度（协议 4.4.21）
-      min_interval_s: 1.0       # 巡航通道最小下发间隔（≥1 Hz，避免刷爆链路）
-      heading_eps_deg: 1.0      # 航向变化阈值
-      height_eps_m: 0.5         # 高度变化阈值
-      resend_cruise_mode_s: 0.0 # >0 时在 cruise 下周期重发 set_cruise_mode（0 = 仅边沿）
-      require_mode: true        # false = 直通（始终按 setpoint 发 fly_point，P6 前行为）
-      mode_timeout_s: 0.0       # >0 时模式消息超时 → 回落 auto（失效安全，0 = 关闭）
-      set_fly_speed_enabled: false  # set_fly_speed 预留，本轮不编码
+      height_type: 0                   # 0 场高 / 1 绝对高度（协议 4.4.21）

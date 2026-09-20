@@ -1,15 +1,19 @@
 /**
  * @file uav_guidance_node.cpp
- * @brief 巡航（cruise）制导节点（R3②，新增）：aoa/uav/planed_path → aoa/uav/guidance
+ * @brief guidance 模式制导节点：aoa/uav/planed_path → aoa/uav/guidance
  *
  * 采样点（Q12/Q16 裁决）：自本机沿 planed_path 起，取**首个曲率为 0 的点**；
  * heads 取该采样点在 ENU 下的航向（默认 sample_yaw），fly_height 取采样点高度。
  *
- * 位姿来源：`pose_source` = `tf2`（默认，查 map→uav）| `topic`（订阅 aoa/uav/state）；
+ * 发布节奏：**严格按 `guidance.publish_rate_hz`（现场 5 Hz）单一定时器周期发布**；
+ *          不再做“路径到达变化触发”补发（否则会与定时器叠加成 5~9 Hz 的非均匀流，
+ *          而 mqtt_control_bridge 对该话题做 1:1 透传，抖动会直接传到飞控）。
+ *
+ * 位姿来源：`pose_source` = `tf2`（查 map→uav）| `topic`（订阅 aoa/uav/state，现场推荐）；
  *           tf2 失败时自动回退 topic 并限流告警。
  *
- * **不间断发布**：不判断模式、不暂停（是否出网由 mqtt_control_bridge 依 MQTT 模式决定）；
- * 不订阅 aoa/uav/set_cruise_mode。
+ * **不间断发布**：不判断模式、不暂停（是否出网由 mqtt_control_bridge 依 `aoa/uav/nav_mode`
+ * 决定）；不订阅 `aoa/uav/nav_mode`。
  */
 
 #include <chrono>
@@ -42,9 +46,7 @@ public:
     {
         topic_ = uav_guide::ros_utils::get_string(*this, "guidance.topic", "aoa/uav/guidance");
         const double rate_hz =
-            uav_guide::ros_utils::get_double(*this, "guidance.publish_rate_hz", 1.0);
-        heads_eps_deg_ = uav_guide::ros_utils::get_double(*this, "guidance.heads_eps_deg", 1.0);
-        height_eps_m_ = uav_guide::ros_utils::get_double(*this, "guidance.height_eps_m", 0.5);
+            uav_guide::ros_utils::get_double(*this, "guidance.publish_rate_hz", 5.0);
         pose_source_ = uav_guide::ros_utils::get_string(*this, "guidance.pose_source", "tf2");
         map_frame_ = uav_guide::ros_utils::get_string(*this, "guidance.map_frame", "map");
         uav_frame_ = uav_guide::ros_utils::get_string(*this, "guidance.uav_frame", "aoa/uav_base_link");
@@ -61,8 +63,7 @@ public:
             uav_guide::ros_utils::get_string(*this, "output.planed_path_topic", "aoa/uav/planed_path"),
             latched, [this](uav_guide::msg::UavPlannedPath::SharedPtr msg) {
                 if (msg->success && !msg->path.empty()) {
-                    path_ = uav_guide::ros_utils::to_path_points(msg->path);
-                    publish_if_changed();
+                    path_ = uav_guide::ros_utils::to_path_points(msg->path);   // 仅缓存，发布交给定时器
                 }
             });
         sub_uav_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -112,16 +113,6 @@ private:
         }
     }
 
-    void publish_if_changed()
-    {
-        if (path_.empty() || !target_.valid) return;
-        const auto out = uav_guide::guidance::build(path_, resolve_uav_state(), target_, cfg_);
-        const double dh = std::abs(out.heads_deg - last_heads_deg_);
-        const double dz = std::abs(out.fly_height - last_fly_height_);
-        const bool changed = !has_published_ || dh >= heads_eps_deg_ || dz >= height_eps_m_;
-        if (changed) publish(out);
-    }
-
     void publish_guidance()
     {
         if (path_.empty() || !target_.valid) {
@@ -151,24 +142,14 @@ private:
                              "(sample#%zu%s)",
                              out.heads_deg, out.fly_height, out.fly_speed_mps, out.sample_index,
                              out.sample_fallback ? ", fallback" : "");
-
-        last_heads_deg_ = out.heads_deg;
-        last_fly_height_ = out.fly_height;
-        has_published_ = true;
     }
 
     std::string topic_, pose_source_, map_frame_, uav_frame_, frame_id_;
-    double heads_eps_deg_ = 1.0;
-    double height_eps_m_ = 0.5;
 
     uav_guide::GuidanceConfig cfg_;
     std::vector<uav_guide::PathPoint> path_;
     uav_guide::State5 target_;
     uav_guide::State5 uav_from_topic_;
-
-    double last_heads_deg_ = 0.0;
-    double last_fly_height_ = 0.0;
-    bool has_published_ = false;
 
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;

@@ -1,108 +1,121 @@
 /**
  * @file test_mode_gate.cpp
- * @brief 出站截断矩阵单测（P6）：3 模式 × 2 通道 + 模式跃迁边沿 + 字符串容错
+ * @brief 模式解析与出站透传映射表单测（纯翻译器语义）
  */
 
 #include <gtest/gtest.h>
 
 #include "ros_mqtt_bridge/mode_gate.h"
 
-using ros_mqtt_bridge::CruiseMode;
-using ros_mqtt_bridge::OutChannel;
-using ros_mqtt_bridge::cruiseModeName;
-using ros_mqtt_bridge::isChannelEnabled;
-using ros_mqtt_bridge::needsCruiseModeCommand;
-using ros_mqtt_bridge::parseCruiseMode;
+using ros_mqtt_bridge::forwardsGuidance;
+using ros_mqtt_bridge::forwardsSetpoint;
+using ros_mqtt_bridge::NavMode;
+using ros_mqtt_bridge::navModeName;
+using ros_mqtt_bridge::outboundPlan;
+using ros_mqtt_bridge::parseNavMode;
 
 // ── 解析 ─────────────────────────────────────────────────────
 
 TEST(ModeGate, ParseValid)
 {
-    CruiseMode m = CruiseMode::Cruise;
-    ASSERT_TRUE(parseCruiseMode("auto", m));
-    EXPECT_EQ(m, CruiseMode::Auto);
-    ASSERT_TRUE(parseCruiseMode("setpoint", m));
-    EXPECT_EQ(m, CruiseMode::Setpoint);
-    ASSERT_TRUE(parseCruiseMode("cruise", m));
-    EXPECT_EQ(m, CruiseMode::Cruise);
+    NavMode m = NavMode::Auto;
+    ASSERT_TRUE(parseNavMode("auto", m));
+    EXPECT_EQ(m, NavMode::Auto);
+    ASSERT_TRUE(parseNavMode("setpoint", m));
+    EXPECT_EQ(m, NavMode::Setpoint);
+    ASSERT_TRUE(parseNavMode("guidance", m));
+    EXPECT_EQ(m, NavMode::Guidance);
 }
 
 TEST(ModeGate, ParseTolerantCaseAndSpace)
 {
-    CruiseMode m = CruiseMode::Auto;
-    ASSERT_TRUE(parseCruiseMode("  CRUISE ", m));
-    EXPECT_EQ(m, CruiseMode::Cruise);
-    ASSERT_TRUE(parseCruiseMode("SetPoint", m));
-    EXPECT_EQ(m, CruiseMode::Setpoint);
-    ASSERT_TRUE(parseCruiseMode("\tAUTO", m));
-    EXPECT_EQ(m, CruiseMode::Auto);
+    NavMode m = NavMode::Auto;
+    ASSERT_TRUE(parseNavMode("  GUIDANCE ", m));
+    EXPECT_EQ(m, NavMode::Guidance);
+    ASSERT_TRUE(parseNavMode("SetPoint", m));
+    EXPECT_EQ(m, NavMode::Setpoint);
+    ASSERT_TRUE(parseNavMode("\tAUTO", m));
+    EXPECT_EQ(m, NavMode::Auto);
 }
 
 TEST(ModeGate, ParseInvalidKeepsValue)
 {
-    CruiseMode m = CruiseMode::Cruise;
-    EXPECT_FALSE(parseCruiseMode("", m));
-    EXPECT_FALSE(parseCruiseMode("   ", m));
-    EXPECT_FALSE(parseCruiseMode("manual", m));
-    EXPECT_FALSE(parseCruiseMode("auto2", m));
-    EXPECT_EQ(m, CruiseMode::Cruise) << "非法输入不得修改 out";
+    NavMode m = NavMode::Guidance;
+    EXPECT_FALSE(parseNavMode("", m));
+    EXPECT_FALSE(parseNavMode("   ", m));
+    EXPECT_FALSE(parseNavMode("cruise", m)) << "旧模式名 cruise 已废弃，不做别名兼容";
+    EXPECT_FALSE(parseNavMode("manual", m));
+    EXPECT_EQ(m, NavMode::Guidance) << "非法输入不得修改 out";
 }
 
 TEST(ModeGate, NamesRoundTrip)
 {
-    EXPECT_STREQ(cruiseModeName(CruiseMode::Auto), "auto");
-    EXPECT_STREQ(cruiseModeName(CruiseMode::Setpoint), "setpoint");
-    EXPECT_STREQ(cruiseModeName(CruiseMode::Cruise), "cruise");
+    EXPECT_STREQ(navModeName(NavMode::Auto), "auto");
+    EXPECT_STREQ(navModeName(NavMode::Setpoint), "setpoint");
+    EXPECT_STREQ(navModeName(NavMode::Guidance), "guidance");
 
-    for (auto mode : {CruiseMode::Auto, CruiseMode::Setpoint, CruiseMode::Cruise}) {
-        CruiseMode back = CruiseMode::Auto;
-        ASSERT_TRUE(parseCruiseMode(cruiseModeName(mode), back));
+    for (auto mode : {NavMode::Auto, NavMode::Setpoint, NavMode::Guidance}) {
+        NavMode back = NavMode::Auto;
+        ASSERT_TRUE(parseNavMode(navModeName(mode), back));
         EXPECT_EQ(back, mode);
     }
 }
 
-// ── 截断矩阵 3 × 2 ───────────────────────────────────────────
+// ── 透传映射表（纯翻译器：1 条上游 → N 条出网）─
 
-TEST(ModeGate, MatrixAutoSilent)
+TEST(ModeGate, AutoIsSilent)
 {
-    EXPECT_FALSE(isChannelEnabled(CruiseMode::Auto, OutChannel::Setpoint));
-    EXPECT_FALSE(isChannelEnabled(CruiseMode::Auto, OutChannel::Guidance));
+    const auto p = outboundPlan(NavMode::Auto);
+    EXPECT_FALSE(p.fly_point);
+    EXPECT_FALSE(p.set_cruise_mode);
+    EXPECT_FALSE(p.set_fly_head);
+    EXPECT_FALSE(p.set_fly_height);
+    EXPECT_FALSE(forwardsSetpoint(NavMode::Auto));
+    EXPECT_FALSE(forwardsGuidance(NavMode::Auto));
 }
 
-TEST(ModeGate, MatrixSetpointOnlySetpointChannel)
+TEST(ModeGate, SetpointForwardsOnlyFlyPoint)
 {
-    EXPECT_TRUE(isChannelEnabled(CruiseMode::Setpoint, OutChannel::Setpoint));
-    EXPECT_FALSE(isChannelEnabled(CruiseMode::Setpoint, OutChannel::Guidance));
+    const auto p = outboundPlan(NavMode::Setpoint);
+    EXPECT_TRUE(p.fly_point);
+    EXPECT_FALSE(p.set_cruise_mode);
+    EXPECT_FALSE(p.set_fly_head);
+    EXPECT_FALSE(p.set_fly_height);
+    EXPECT_TRUE(forwardsSetpoint(NavMode::Setpoint));
+    EXPECT_FALSE(forwardsGuidance(NavMode::Setpoint));
 }
 
-TEST(ModeGate, MatrixCruiseOnlyGuidanceChannel)
+TEST(ModeGate, GuidanceForwardsThreeMethodsPerTick)
 {
-    EXPECT_FALSE(isChannelEnabled(CruiseMode::Cruise, OutChannel::Setpoint));
-    EXPECT_TRUE(isChannelEnabled(CruiseMode::Cruise, OutChannel::Guidance));
+    // set_cruise_mode 不再边沿触发：与 head/height **同频**随每帧 guidance 发出
+    const auto p = outboundPlan(NavMode::Guidance);
+    EXPECT_FALSE(p.fly_point);
+    EXPECT_TRUE(p.set_cruise_mode);
+    EXPECT_TRUE(p.set_fly_head);
+    EXPECT_TRUE(p.set_fly_height);
+    EXPECT_FALSE(forwardsSetpoint(NavMode::Guidance));
+    EXPECT_TRUE(forwardsGuidance(NavMode::Guidance));
 }
 
-TEST(ModeGate, MatrixExactlyOneChannelNonAuto)
+TEST(ModeGate, SetpointEmitsOnePerUpstreamMessage)
 {
-    for (auto mode : {CruiseMode::Setpoint, CruiseMode::Cruise}) {
-        const int enabled = static_cast<int>(isChannelEnabled(mode, OutChannel::Setpoint)) +
-                            static_cast<int>(isChannelEnabled(mode, OutChannel::Guidance));
-        EXPECT_EQ(enabled, 1) << "非 auto 模式下必须恰有一路出网 (" << cruiseModeName(mode) << ")";
+    const auto p = outboundPlan(NavMode::Setpoint);
+    const int n = static_cast<int>(p.fly_point) + static_cast<int>(p.set_cruise_mode) +
+                  static_cast<int>(p.set_fly_head) + static_cast<int>(p.set_fly_height);
+    EXPECT_EQ(n, 1) << "上游 5 Hz → fly_point 5 Hz";
+}
+
+TEST(ModeGate, GuidanceEmitsThreePerUpstreamMessage)
+{
+    const auto p = outboundPlan(NavMode::Guidance);
+    const int n = static_cast<int>(p.set_cruise_mode) + static_cast<int>(p.set_fly_head) +
+                  static_cast<int>(p.set_fly_height);
+    EXPECT_EQ(n, 3) << "上游 5 Hz → set_cruise_mode/set_fly_head/set_fly_height 各 5 Hz";
+}
+
+TEST(ModeGate, NonAutoAlwaysForwardsSomething)
+{
+    for (auto mode : {NavMode::Setpoint, NavMode::Guidance}) {
+        EXPECT_TRUE(forwardsSetpoint(mode) || forwardsGuidance(mode));
     }
-}
-
-// ── set_cruise_mode 边沿 ─────────────────────────────────────
-
-TEST(ModeGate, CruiseEdgeOnlyOnEntry)
-{
-    EXPECT_TRUE(needsCruiseModeCommand(CruiseMode::Auto, CruiseMode::Cruise));
-    EXPECT_TRUE(needsCruiseModeCommand(CruiseMode::Setpoint, CruiseMode::Cruise));
-    EXPECT_FALSE(needsCruiseModeCommand(CruiseMode::Cruise, CruiseMode::Cruise)) << "同模式不重发";
-}
-
-TEST(ModeGate, NoCruiseCommandLeavingOrStandby)
-{
-    EXPECT_FALSE(needsCruiseModeCommand(CruiseMode::Cruise, CruiseMode::Auto));
-    EXPECT_FALSE(needsCruiseModeCommand(CruiseMode::Cruise, CruiseMode::Setpoint));
-    EXPECT_FALSE(needsCruiseModeCommand(CruiseMode::Auto, CruiseMode::Setpoint));
-    EXPECT_FALSE(needsCruiseModeCommand(CruiseMode::Setpoint, CruiseMode::Auto));
 }

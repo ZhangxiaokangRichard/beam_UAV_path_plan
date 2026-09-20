@@ -66,10 +66,9 @@
     guidance:
       topic: "aoa/uav/guidance"
       curvature_eps: 0.0001
-      fly_speed_mps: 50.0            # 本轮为常量占位（后续接 set_fly_speed）
-      publish_rate_hz: 1.0
-      heads_eps_deg: 1.0             # 变化触发阈值
-      height_eps_m: 0.5
+      fly_speed_mps: 50.0            # 常量占位（后续可接 set_fly_speed）
+      # 严格按该周期发布（单一定时器，无“变化触发”补发）→ mqtt_control_bridge 1:1 透传
+      publish_rate_hz: 5.0
       sample_rule: "first_zero_curvature"     # | first_nonzero_curvature
       heads_source: "sample_yaw"              # | bearing_to_sample
       height_source: "sample_point_z"         # | target_z

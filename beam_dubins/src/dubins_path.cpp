@@ -262,22 +262,18 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
     std::vector<Waypoint> path;
 
     // ── 辅助 lambda：添加点 ──
-    auto add_point = [&path](double x, double y, double z, double yaw) {
-        path.push_back({x, y, z, yaw, 0.0, 0.0});
+    // curvature：直行 = 0，转弯 = ±1/R（逆时针为正、顺时针为负）。
+    // 该字段是下游 uav_guide 判定“直线 / 圆弧”的唯一依据（|κ| > curvature_eps → Arc）；
+    // 漏填会让整条路径被当成直线，使 guidance 的 first_zero_curvature 采样规则恒命中起点。
+    auto add_point = [&path](double x, double y, double z, double yaw, double curvature) {
+        path.push_back({x, y, z, yaw, 0.0, curvature});
     };
 
     double z_start = params.t1.z;
     double z_end   = params.t2.z;
 
     // ── 第一段弧 ──
-    double ang1 = params.arc1_angle;
-    double sweep1 = ang1;  // 已带符号
-    // 起始角：从 c1 指向起点
-    double a0_1 = std::atan2(params.t1.y - params.c1.y - M_PI/2 * 0,  // 跳过
-                             0);  // 此处需要计算正确的起始角
-    // 重新计算：起点 psi_s → 圆心角
-    // 从 c1 到起点的方向 = psi_s ± π/2
-    // 更简单：直接用 sample_arc_2d 从切点开始
+    // 弧的起点圆心角 = ang_t1 - sweep（相差一个扫掠角），故无需在此保存原始 sp/ep 坐标。
 
     // 实际上，我们采样时用简化方式：
     //  第一段弧：从起点位置 (通过 params.t1 的位置) 沿圆弧到 t1
@@ -316,7 +312,8 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
     // 圆弧起始角（从 c1 看 t1 的反方向 sweep）
     double start_ang1 = ang_t1 - sweep_arc1;  // t1 在弧末端
 
-    // 采样弧1
+    // 采样弧1（曲率：L 弧 = +1/R，R 弧 = -1/R）
+    const double k_arc1 = (sweep_arc1 > 0.0) ? (1.0 / R_h_) : (-1.0 / R_h_);
     int n1 = std::max(2, n_arc);
     for (int i = 0; i < n1; ++i) {
         double frac = static_cast<double>(i) / (n1 - 1);
@@ -326,7 +323,7 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
         // 弧上的航向：半径方向旋转 π/2
         double yaw_on_arc = a + ((sweep_arc1 > 0) ? M_PI / 2.0 : -M_PI / 2.0);
         double z = z_start + frac * (z_end - z_start) * (params.arc1_len / params.total_len);
-        add_point(x, y, z, yaw_on_arc);
+        add_point(x, y, z, yaw_on_arc, k_arc1);
     }
 
     // 直线段
@@ -336,7 +333,7 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
         double x = params.t1.x + frac * (params.t2.x - params.t1.x);
         double y = params.t1.y + frac * (params.t2.y - params.t1.y);
         double z = z_start + (params.arc1_len + frac * params.straight_len) / params.total_len * (z_end - z_start);
-        add_point(x, y, z, params.t1.yaw);  // 直行航向恒定
+        add_point(x, y, z, params.t1.yaw, 0.0);  // 直行：航向恒定、曲率 0
     }
 
     // 弧2：从 t2 到终点
@@ -345,6 +342,8 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
     double sweep_arc2 = params.arc2_angle;
     double start_ang2 = ang_t2;  // t2 在弧起始
 
+    // 采样弧2（曲率符号同弧1，按实际扫掠方向判定）
+    const double k_arc2 = (sweep_arc2 > 0.0) ? (1.0 / R_h_) : (-1.0 / R_h_);
     int n2 = std::max(2, n_arc);
     for (int i = 1; i < n2; ++i) {  // 跳过 i=0
         double frac = static_cast<double>(i) / (n2 - 1);
@@ -353,7 +352,7 @@ std::vector<Waypoint> DubinsPath3D::sample_path(
         double y = c2_arr[1] + R_h_ * std::sin(a);
         double yaw_on_arc = a + ((sweep_arc2 > 0) ? M_PI / 2.0 : -M_PI / 2.0);
         double z = z_start + (params.arc1_len + params.straight_len + frac * params.arc2_len) / params.total_len * (z_end - z_start);
-        add_point(x, y, z, yaw_on_arc);
+        add_point(x, y, z, yaw_on_arc, k_arc2);
     }
 
     return path;

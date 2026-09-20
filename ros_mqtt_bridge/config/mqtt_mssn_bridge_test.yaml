@@ -6,14 +6,14 @@
       port: 1883
       qos: 0
       keepalive_s: 30
-      mode_cmd_topic: beam_test/ai_guide/set_cruise_mode
+      mode_cmd_topic: beam_test/ai_guide/nav/mode
       nav_cmd_topic: beam_test/ai_guide/nav/cmd
       guide_cmd_topic: beam_test/ai_guide/guide/cmd
       nav_status_topic: beam_test/ai_guide/nav/status
       guide_status_topic: beam_test/ai_guide/guide/status
 
     topics:
-      mode_state: aoa/uav/set_cruise_mode
+      mode_state: aoa/uav/nav_mode
       tracking_mode: aoa/uav/tracking_mode
 
     mssn:

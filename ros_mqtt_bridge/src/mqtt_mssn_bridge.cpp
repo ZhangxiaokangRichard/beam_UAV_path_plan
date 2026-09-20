@@ -1,21 +1,25 @@
 /**
  * @file mqtt_mssn_bridge.cpp
- * @brief 任务/模式桥（P6）——ROS2 版等价物，取代 1.0.1 的 mqtt_mssn_bridge
+ * @brief 任务/模式桥：MQTT `aoa/ai_guide/*` ↔ ROS，兼管导航栈与控制桥的启停
  *
- * 职责（Q8 裁决）：模式与启停的**唯一** MQTT 入口，决定
- *   1) `uav_guide_launch.py`（导航栈：planner + 3 个 guide 节点）的启动与停止
- *   2) `mqtt_control_bridge`（出站控制节点）的启动与停止
+ * 职责：
+ *   1) 模式状态入口：MQTT `aoa/ai_guide/nav/mode`（auto | setpoint | guidance）
+ *      → ROS 镜像 `aoa/uav/nav_mode`（std_msgs/String，**纯模式名**，latched）
+ *      `mqtt_control_bridge` 订阅该话题得到**当前模式状态**（非边沿），并按映射表
+ *      把制导消息翻译为 MQTT 指令。
+ *   2) `uav_guide_launch.py`（导航栈：planner + 3 个 guide 节点）的启动与停止
+ *   3) `mqtt_control_bridge`（出站控制节点）的启动与停止
  *
  * 入站（MQTT → 本节点）：
- *   `aoa/ai_guide/set_cruise_mode`  {"mode":"auto|setpoint|cruise"}  → 转 ROS 镜像 `aoa/uav/set_cruise_mode`
- *   `aoa/ai_guide/nav/cmd`          {"start":<bool>}                → 启停导航栈
- *   `aoa/ai_guide/guide/cmd`        {"start":<bool>}                → 启停控制桥
+ *   `aoa/ai_guide/nav/mode`   "guidance" 或 {"mode":"guidance"}   → 转 ROS `aoa/uav/nav_mode`
+ *   `aoa/ai_guide/nav/cmd`    {"start":<bool>}                     → 启停导航栈
+ *   `aoa/ai_guide/guide/cmd`  {"start":<bool>}                     → 启停控制桥
  * 出站（本节点 → MQTT）：
- *   `aoa/ai_guide/nav/status`       {"running":<bool>}
- *   `aoa/ai_guide/guide/status`     {"running":<bool>,"mode":"...","tracking":<bool>}
+ *   `aoa/ai_guide/nav/status`   {"running":<bool>}
+ *   `aoa/ai_guide/guide/status` {"running":<bool>,"mode":"..."}
  *
  * 进程管理：fork + setsid + `/bin/bash -c "<setup> && exec <cmd>"`，日志落盘；
- * 停止：killpg(SIGTERM) → 超时 SIGKILL → `pkill -f <pattern>` 兜底。
+ * 停止：killpg(SIGTERM) → 超时 SIGKILL，并用 /proc 扫描排除遗留实例。
  * 安全：`mssn.enable_process_control=false` 时只做模式转发，不启停任何进程（离线测试用）。
  */
 
@@ -85,22 +89,28 @@ bool param_bool(const rclcpp::Node& node, const std::string& name, bool fallback
     return fallback;
 }
 
-/// 容错提取模式：{"mode":...} 或 {"data":{"mode":...}}
+/** 容错提取模式：纯模式名（"guidance"）或 JSON {"mode":...} / {"data":{"mode":...}} */
 std::string extractModeTolerant(const std::string& payload)
 {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    auto b = std::find_if(payload.begin(), payload.end(), not_space);
+    auto e = std::find_if(payload.rbegin(), payload.rend(), not_space).base();
+    if (b >= e) return {};
+    const std::string trimmed(b, e);
+    if (trimmed.front() != '{') return trimmed;
+
     std::string err;
     std::string mode;
-    if (ros_mqtt_bridge::decodeStateString(payload, "mode", mode, err) && !mode.empty()) return mode;
-    // 退化路径：手工查找第二层
-    const auto key = payload.find("\"mode\"");
+    if (ros_mqtt_bridge::decodeStateString(trimmed, "mode", mode, err) && !mode.empty()) return mode;
+    const auto key = trimmed.find("\"mode\"");
     if (key == std::string::npos) return {};
-    const auto colon = payload.find(':', key);
+    const auto colon = trimmed.find(':', key);
     if (colon == std::string::npos) return {};
-    const auto q1 = payload.find('"', colon);
+    const auto q1 = trimmed.find('"', colon);
     if (q1 == std::string::npos) return {};
-    const auto q2 = payload.find('"', q1 + 1);
+    const auto q2 = trimmed.find('"', q1 + 1);
     if (q2 == std::string::npos) return {};
-    return payload.substr(q1 + 1, q2 - q1 - 1);
+    return trimmed.substr(q1 + 1, q2 - q1 - 1);
 }
 
 // ── /proc 进程扫描（不依赖 shell，避免 pgrep/pkill 自我匹配）────────────
@@ -332,7 +342,7 @@ public:
         const int keepalive = static_cast<int>(param_int(*this, "mqtt.keepalive_s", 30));
 
         const std::string mode_cmd_topic =
-            param_string(*this, "mqtt.mode_cmd_topic", "aoa/ai_guide/set_cruise_mode");
+            param_string(*this, "mqtt.mode_cmd_topic", "aoa/ai_guide/nav/mode");
         const std::string nav_cmd_topic =
             param_string(*this, "mqtt.nav_cmd_topic", "aoa/ai_guide/nav/cmd");
         const std::string guide_cmd_topic =
@@ -341,7 +351,7 @@ public:
         guide_status_topic_ =
             param_string(*this, "mqtt.guide_status_topic", "aoa/ai_guide/guide/status");
 
-        mode_state_topic_ = param_string(*this, "topics.mode_state", "aoa/uav/set_cruise_mode");
+        mode_state_topic_ = param_string(*this, "topics.mode_state", "aoa/uav/nav_mode");
         tracking_topic_ = param_string(*this, "topics.tracking_mode", "aoa/uav/tracking_mode");
 
         // ── 进程管理配置 ──
@@ -405,7 +415,7 @@ public:
                     "  process_control=%d workspace='%s'",
                     host.c_str(), port, mode_cmd_topic.c_str(), nav_cmd_topic.c_str(),
                     guide_cmd_topic.c_str(), nav_status_topic_.c_str(), guide_status_topic_.c_str(),
-                    mode_state_topic_.c_str(), ros_mqtt_bridge::cruiseModeName(mode_),
+                    mode_state_topic_.c_str(), ros_mqtt_bridge::navModeName(mode_),
                     static_cast<int>(enable_process_control_), workspace_dir.c_str());
     }
 
@@ -413,7 +423,7 @@ private:
     // ── MQTT 入站分发 ──
     void onMqttMessage(const std::string& topic, const std::string& payload)
     {
-        if (topic.find("set_cruise_mode") != std::string::npos) {
+        if (topic.find("nav/mode") != std::string::npos) {
             handleMode(payload);
         } else if (topic.find("/nav/cmd") != std::string::npos) {
             handleSwitch(payload, "start", nav_, "nav");
@@ -427,23 +437,24 @@ private:
     void handleMode(const std::string& payload)
     {
         const std::string raw = extractModeTolerant(payload);
-        ros_mqtt_bridge::CruiseMode parsed;
-        if (raw.empty() || !ros_mqtt_bridge::parseCruiseMode(raw, parsed)) {
-            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] invalid mode payload: %s", payload.c_str());
+        ros_mqtt_bridge::NavMode parsed;
+        if (raw.empty() || !ros_mqtt_bridge::parseNavMode(raw, parsed)) {
+            RCLCPP_WARN(get_logger(), "[mqtt_mssn_bridge] invalid nav_mode payload: %s "
+                                     "(期望 auto | setpoint | guidance)", payload.c_str());
             return;
         }
         const auto previous = mode_;
         mode_ = parsed;
         publishModeState();
         RCLCPP_INFO(get_logger(), "[mqtt_mssn_bridge] mode %s -> %s (mirrored to %s)",
-                    ros_mqtt_bridge::cruiseModeName(previous), ros_mqtt_bridge::cruiseModeName(mode_),
+                    ros_mqtt_bridge::navModeName(previous), ros_mqtt_bridge::navModeName(mode_),
                     mode_state_topic_.c_str());
 
         if (!enable_process_control_) return;
-        if (mode_ != ros_mqtt_bridge::CruiseMode::Auto && start_guide_on_mode_) {
+        if (mode_ != ros_mqtt_bridge::NavMode::Auto && start_guide_on_mode_) {
             // 非 auto：确保出站控制桥在线（导航栈由显式 nav/cmd 控制）
             guide_.start(get_logger());
-        } else if (mode_ == ros_mqtt_bridge::CruiseMode::Auto && stop_guide_on_auto_) {
+        } else if (mode_ == ros_mqtt_bridge::NavMode::Auto && stop_guide_on_auto_) {
             guide_.stop(get_logger());
         }
     }
@@ -474,7 +485,7 @@ private:
     void publishModeState()
     {
         std_msgs::msg::String msg;
-        msg.data = std::string("{\"mode\":\"") + ros_mqtt_bridge::cruiseModeName(mode_) + "\"}";
+        msg.data = ros_mqtt_bridge::navModeName(mode_);   // 纯模式名（std_msgs/String）
         pub_mode_state_->publish(msg);
     }
 
@@ -492,7 +503,7 @@ private:
                    "nav/status");
         std::ostringstream oss;
         oss << "{\"running\":" << (guide_running ? "true" : "false")
-            << ",\"mode\":\"" << ros_mqtt_bridge::cruiseModeName(mode_) << "\""
+            << ",\"mode\":\"" << ros_mqtt_bridge::navModeName(mode_) << "\""
             << ",\"tracking\":" << (tracking_ ? "true" : "false") << "}";
         publishRaw(guide_status_topic_, oss.str(), "guide/status");
     }
@@ -513,7 +524,7 @@ private:
     ManagedProcess nav_, guide_;
 
     std::string mode_state_topic_, tracking_topic_, nav_status_topic_, guide_status_topic_;
-    ros_mqtt_bridge::CruiseMode mode_ = ros_mqtt_bridge::CruiseMode::Auto;
+    ros_mqtt_bridge::NavMode mode_ = ros_mqtt_bridge::NavMode::Auto;
     bool enable_process_control_ = true;
     bool start_guide_on_mode_ = true;
     bool stop_guide_on_auto_ = false;

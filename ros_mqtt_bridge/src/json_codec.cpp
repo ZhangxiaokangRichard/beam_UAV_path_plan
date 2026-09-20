@@ -372,8 +372,11 @@ std::string encodeSetCruiseMode(const std::string& mid)
 
 std::string encodeSetFlyHead(double heading_deg, const std::string& mid)
 {
-    double heading = std::fmod(heading_deg, 360.0);
-    if (heading < 0.0) heading += 360.0;
+    // 先归一到 [0,360)，再量化到 0.1°，最后回绕——
+    // 否则 359.96 经 1 位小数四舍五入会变成 "360.0"，超出协议约定的 [0,360)（现场抓包实测过）。
+    double heading = heading_deg - 360.0 * std::floor(heading_deg / 360.0);   // [0,360)
+    heading = std::round(heading * 10.0) / 10.0;                              // 量化到 0.1°
+    if (heading >= 360.0) heading = 0.0;
 
     std::ostringstream data;
     data << "{\"heading\":" << std::fixed << std::setprecision(1) << heading << "}";
