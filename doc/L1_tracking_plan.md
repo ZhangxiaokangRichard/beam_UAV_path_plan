@@ -1,9 +1,11 @@
 # L1 路径跟踪制导方案（`uav_guidance_node`）
 
-> 状态：**设计稿（评审中，尚未实现）** —— 2026-09-20
+> 状态：**已实现**（2026-09-24；`uav_guide` 单测 31/31、全仓 52/52 通过；MQTT 现场集成测试待做）
 > 适用版本：**2.0.0（ROS2 Humble）**
 > 关联文档：[`quick_start.md`](quick_start.md)（运行/分节点测试）、[`ros2rebuild.md`](ros2rebuild.md)（架构与裁决记录）
-> 本文只描述方案，**不含代码改动**；实现清单一律列在 [§10](#10-实施清单待批准)，批准后另行执行。
+> 实现落点：`guidance.cpp::solve_l1()/build()`、`path.cpp::project()/point_at_arclength()`、
+> `uav_guidance_node.cpp`（保护保持/降级）、`uav_guide.yaml`。参数默认值见 [§4](#4-参数)，
+> 已完成单测见 [§8.0](#80-已完成的单元测试2026-09-24)，现场集成测试步骤见 [§8.3](#83-真机)。
 
 ---
 
@@ -130,6 +132,8 @@ R_cmd = D / (2·sin|β|),   D = |P_L1 − P|  ≈ L1
 补充规则：
 
 - **死区**：`|β| < beta_deadband` → `κ_cmd = 0`（抑制出站流无意义抖动）。
+  注意：默认 0.5° 对应 **≈ L1·tan(0.5°) ≈ 8.7 m 的横向无差区**（闭环单测实测终值 8.58 m），
+  即路径附近存在一条“不修正”的窄带；要更紧贴路径就减小 `beta_deadband_deg`。
 - **限幅**：`|ψ_cmd − ψ_uav| ≤ ω_max·T_lead`，`ω_max = V/R_c`（由 ⑤ 自动满足，外加一道防御）。
 - **异常保护**：`|β| > 90°`（参考点在本机侧后方，多半是投影跳变或路径倒退）→ 指令维持在上一周期值，并置告警计数；连续 N 周期则退化为"朝参考点直飞"。
 - **高度解耦**：`fly_height` 由既有配置决定（建议按既定设计用 `target_z`），与 L1 无关。
@@ -219,6 +223,27 @@ R_cmd = D / (2·sin|β|),   D = |P_L1 − P|  ≈ L1
 
 ## 8. 验收与测试计划
 
+### 8.0 已完成的单元测试（2026-09-24）
+
+新增 **11 项**（3 项路径几何 + 8 项 L1），`uav_guide` 30→31 项、全仓 41→52 项，**0 失败**：
+
+| 用例 | 验证内容 | 结果 |
+|---|---|---|
+| `PathGeometry.ProjectInterpolatesInsideSegment` | 段内投影插值（段索引 / t / s_m / 距差） | ✅ |
+| `PathGeometry.ProjectClampsBeyondBothEnds` | 本机在路径两端之外时夹到端点 | ✅ |
+| `PathGeometry.ArclengthLookupInterpolatesAndClamps` | 弧长取点插值与夹取 + `length()` | ✅ |
+| `L1.LookaheadIsConstantAlongPath` | **参考点沿弧长恒定在前方 L1 处**（点距 91.559 m 也不跳变） | ✅ |
+| `L1.LateralOffsetCommandsTurnTowardPath` | β 符号、`κ=2sinβ/L1`、输出航向方向正确 | ✅ |
+| `L1.CurvatureSaturatesAtTurnRadius` | β=60°、L1=500<2R_c 时 κ 饱和到 1/R_c | ✅ |
+| `L1.GuardHoldsWhenReferenceIsBehind` | 参考点在正后方（\|β\|≈180°）→ 保护置位 + LOS 航向 270° | ✅ |
+| `L1.NearEndClampsReferenceToPathEnd` | 剩余 400 m < L1=1000 → 参考点收到末点 | ✅ |
+| `L1.MissingPoseHoldsPrevious` | 位姿无效 → `l1_eff_m=0`，节点应跳过发布 | ✅ |
+| `L1.ClosedLoopConvergesWithTheoryDamping` | 闭环横向收敛：超调落在 1%~8%（理论 4.3%） | ✅ |
+| `L1.DeadbandLeavesBoundedResidual` | 死区导致的有界无差区 ≈ L1·tan(0.5°) | ✅ |
+
+> 闭环测试直接拿 `solve_l1()` 的解按 `ω = V·κ` 积分（理想执行器），验证的是**控制律本身的 ζ/ω_n**，
+> 与飞控内环无关；真机仍需按 §8.3 复核，并用 `lead_time_s` 补偿内环滞后。
+
 ### 8.1 离线仿真（先做，最省成本）
 1D/2D 横向动力学 + 按 §3 的流程，验证：
 - ζ ≈ 0.707、超调 ≈ 4.3 %、稳态横向误差 → 0；
@@ -260,20 +285,22 @@ R_cmd = D / (2·sin|β|),   D = |P_L1 − P|  ≈ L1
 
 ---
 
-## 10. 实施清单（待批准）
+## 10. 实施清单
 
-> 本节仅为**待办清单**，批准后再执行；当前不产生任何代码改动。
+| # | 文件 | 改动 | 状态 |
+|---|---|---|---|
+| 1 | `uav_guide/include/uav_guide/types.hpp` | `HeadsSource::L1`、`State5.speed_mps`、L1 参数与诊断字段 | ✅ |
+| 2 | `uav_guide/src/path.cpp` + `path.hpp` | `length()`、`project()`（段内插值）、`point_at_arclength()` | ✅ |
+| 3 | `uav_guide/src/guidance.cpp` + `guidance.hpp` | `L1Solution` + `solve_l1()` + `build()` 的 L1 分支与保护 | ✅ |
+| 4 | `uav_guide/src/ros_utils.cpp` | 读取新增参数；`to_state5()` 从 `twist` 取地速 | ✅ |
+| 5 | `uav_guide/config/uav_guide.yaml` | 新增 §4 参数；`heads_source: l1`、`height_source: target_z` | ✅ |
+| 6 | `uav_guide/src/nodes/uav_guidance_node.cpp` | 保护保持上一指令 / 连续越界降级直飞参考点；L1 日志 | ✅ |
+| 7 | `uav_guide/test/test_uav_guide.cpp` | 11 项新增用例（见 §8.0） | ✅ |
+| 8 | `doc/quick_start.md` | T5 增补 L1 观测；排障表增补判定方法；频率/单位表增补 L1 参数 | ⏳ 待做 |
+| 9 | 真机集成测试 | 按 §8.3 做阶梯偏置与长航程跟踪，标定 `lead_time_s` | ⏳ 待做（MQTT 上线后） |
 
-| # | 文件 | 改动 |
-|---|---|---|
-| 1 | `uav_guide/include/uav_guide/types.hpp` | 新增 `HeadsSource::L1` 与 L1 参数结构（L1、R_c、lead、deadband、end shrink） |
-| 2 | `uav_guide/src/path.cpp` + `path.hpp` | 新增：段内插值投影（`project`）、弧长取点（`point_at_arclength`） |
-| 3 | `uav_guide/src/guidance.cpp` + `guidance.hpp` | 新增 L1 解算分支（§3 的 ①~⑥ 与保护） |
-| 4 | `uav_guide/src/ros_utils.cpp` | 读取新增参数 |
-| 5 | `uav_guide/config/uav_guide.yaml` | 新增 §4 参数（默认 `l1_distance_m: 1000`、`turn_radius_m: 500`、`lead_time_s: 1.0`） |
-| 6 | `uav_guide/test/test_uav_guide.cpp` | 新增用例：几何（β/κ/R_cmd）、饱和、死区、末端收缩、β>90° 保护、插值连续性 |
-| 7 | `doc/quick_start.md` | §3 T5 增补 L1 观测方法；§5 排障表增补"指令近乎恒定"的判定；§6 频率/单位表增补 L1 参数 |
-| 8 | 离线仿真脚本（不入 ROS 包） | 参数扫描与验收基线 |
+> 不影响既有语义：`sample_yaw` / `bearing_to_sample` 两条旧路径保留，`heads_source` 回改即回到旧行为；
+> `mqtt_control_bridge` 的纯翻译器与 `aoa/uav/guidance` 消息格式/频率均未改动。
 
 ---
 
@@ -304,5 +331,6 @@ R_cmd = D / (2·sin|β|),   D = |P_L1 − P|  ≈ L1
 | 末端大转弯 | **不可见**，需飞到弧附近才被采样 | L1 点在转弯发生前就进入弧内 → 提前表达 |
 | 段边界 | 离散索引切换 → 跳变 | 插值 → 平滑 |
 | 稳定性 | 无解析保证 | ζ = 0.707、ω_n = √2V/L1 |
+| 静差 | — | 有界无差区 ≈ L1·tan(`beta_deadband_deg`) ≈ 8.7 m（可调小） |
 
 > 注：当路径首段就是圆弧时（现场实测那条 48 点计划），两种方法的**选中点恰好相同**（idx 20，heads 273.9°）。因此 L1 的价值不在"改掉某一个点的选择"，而在于把参考点距离**变成常数**、把指令**变成连续量**，并让**前方 L1 内的转弯可见**。

@@ -5,6 +5,8 @@
 
 #include "uav_guide/ros_utils.hpp"
 
+#include <cmath>
+
 #include "uav_guide/mode.hpp"
 #include "uav_guide/state.hpp"
 
@@ -83,12 +85,27 @@ void read_guidance_config(const rclcpp::Node& node, GuidanceConfig& cfg)
                           : SampleRule::FirstZeroCurvature;
 
     const std::string heads_source = get_string(node, "guidance.heads_source", "sample_yaw");
-    cfg.heads_source = (heads_source == "bearing_to_sample") ? HeadsSource::BearingToSample
-                                                             : HeadsSource::SampleYaw;
+    if (heads_source == "l1") {
+        cfg.heads_source = HeadsSource::L1;
+    } else if (heads_source == "bearing_to_sample") {
+        cfg.heads_source = HeadsSource::BearingToSample;
+    } else {
+        cfg.heads_source = HeadsSource::SampleYaw;
+    }
 
     const std::string height_source = get_string(node, "guidance.height_source", "sample_point_z");
     cfg.height_source = (height_source == "target_z") ? HeightSource::TargetZ
                                                       : HeightSource::SamplePointZ;
+
+    // ── L1 路径跟踪参数（heads_source = l1 时生效；设计见 doc/L1_tracking_plan.md）──
+    cfg.l1_distance_m = get_double(node, "guidance.l1_distance_m", cfg.l1_distance_m);
+    cfg.turn_radius_m = get_double(node, "guidance.turn_radius_m", cfg.turn_radius_m);
+    cfg.lead_time_s = get_double(node, "guidance.lead_time_s", cfg.lead_time_s);
+    cfg.speed_mps = get_double(node, "guidance.speed_mps", cfg.speed_mps);
+    cfg.beta_deadband_deg =
+        get_double(node, "guidance.beta_deadband_deg", cfg.beta_deadband_deg);
+    cfg.beta_guard_deg = get_double(node, "guidance.beta_guard_deg", cfg.beta_guard_deg);
+    cfg.end_shrink_ratio = get_double(node, "guidance.end_shrink_ratio", cfg.end_shrink_ratio);
 }
 
 void read_orchestrator_config(const rclcpp::Node& node, OrchestratorConfig& cfg)
@@ -128,13 +145,16 @@ void read_plan_params(const rclcpp::Node& node, PlanParams& params)
 
 State5 to_state5(const nav_msgs::msg::Odometry& odom)
 {
-    return state::from_odometry(odom.pose.pose.position.x,
-                                odom.pose.pose.position.y,
-                                odom.pose.pose.position.z,
-                                odom.pose.pose.orientation.x,
-                                odom.pose.pose.orientation.y,
-                                odom.pose.pose.orientation.z,
-                                odom.pose.pose.orientation.w);
+    State5 s = state::from_odometry(odom.pose.pose.position.x,
+                                    odom.pose.pose.position.y,
+                                    odom.pose.pose.position.z,
+                                    odom.pose.pose.orientation.x,
+                                    odom.pose.pose.orientation.y,
+                                    odom.pose.pose.orientation.z,
+                                    odom.pose.pose.orientation.w);
+    // 地速：L1 解算用（ω = V·κ）；twist 缺失时为 0，解算回退 cfg.speed_mps
+    s.speed_mps = std::hypot(odom.twist.twist.linear.x, odom.twist.twist.linear.y);
+    return s;
 }
 
 std::vector<PathPoint> to_path_points(const std::vector<beam_dubins::msg::PathPoint>& msg_path)

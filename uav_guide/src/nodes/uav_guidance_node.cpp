@@ -2,8 +2,11 @@
  * @file uav_guidance_node.cpp
  * @brief guidance 模式制导节点：aoa/uav/planed_path → aoa/uav/guidance
  *
- * 采样点（Q12/Q16 裁决）：自本机沿 planed_path 起，取**首个曲率为 0 的点**；
- * heads 取该采样点在 ENU 下的航向（默认 sample_yaw），fly_height 取采样点高度。
+ * heads 产生方式由 `guidance.heads_source` 决定：
+ *   - `sample_yaw` / `bearing_to_sample`（Q12/Q16 裁决）：自本机沿 planed_path 起，
+ *     取**首个曲率为 0 的点**，heads 取该采样点在 ENU 下的航向（默认 sample_yaw）；
+ *   - `l1`：**L1 路径跟踪**（前视 L1 点 + 曲率饱和 + 前馈补偿），设计见 doc/L1_tracking_plan.md。
+ * fly_height 由 `guidance.height_source` 决定（sample_point_z | target_z）。
  *
  * 发布节奏：**严格按 `guidance.publish_rate_hz`（现场 5 Hz）单一定时器周期发布**；
  *          不再做“路径到达变化触发”补发（否则会与定时器叠加成 5~9 Hz 的非均匀流，
@@ -35,6 +38,9 @@
 #include "uav_guide/types.hpp"
 
 namespace {
+
+/// 保护持续周期上限（@5 Hz = 1 s）：超过则降级为“朝参考点直飞”
+constexpr int kHoldLimit = 5;
 
 class GuidanceNode : public rclcpp::Node {
 public:
@@ -81,17 +87,30 @@ public:
         timer_ = create_wall_timer(std::chrono::duration<double>(period_s),
                                    [this]() { publish_guidance(); });
 
-        RCLCPP_INFO(get_logger(),
-                    "[uav_guide_guidance] publishing %s at %.1f Hz (sample_rule=%s heads_source=%s "
-                    "height_source=%s pose_source=%s fly_speed=%.1f)",
-                    topic_.c_str(), rate_hz,
-                    cfg_.sample_rule == uav_guide::SampleRule::FirstZeroCurvature
-                        ? "first_zero_curvature" : "first_nonzero_curvature",
-                    cfg_.heads_source == uav_guide::HeadsSource::SampleYaw ? "sample_yaw"
-                                                                          : "bearing_to_sample",
-                    cfg_.height_source == uav_guide::HeightSource::SamplePointZ ? "sample_point_z"
-                                                                                : "target_z",
-                    pose_source_.c_str(), cfg_.fly_speed_mps);
+        if (cfg_.heads_source == uav_guide::HeadsSource::L1) {
+            RCLCPP_INFO(get_logger(),
+                        "[uav_guide_guidance] publishing %s at %.1f Hz (heads_source=l1 "
+                        "L1=%.0fm R_c=%.0fm T_lead=%.2fs speed=%.1fm/s deadband=%.2f° guard=%.0f° "
+                        "height_source=%s pose_source=%s)",
+                        topic_.c_str(), rate_hz, cfg_.l1_distance_m, cfg_.turn_radius_m,
+                        cfg_.lead_time_s, cfg_.speed_mps, cfg_.beta_deadband_deg,
+                        cfg_.beta_guard_deg,
+                        cfg_.height_source == uav_guide::HeightSource::TargetZ ? "target_z"
+                                                                              : "sample_point_z",
+                        pose_source_.c_str());
+        } else {
+            RCLCPP_INFO(get_logger(),
+                        "[uav_guide_guidance] publishing %s at %.1f Hz (sample_rule=%s "
+                        "heads_source=%s height_source=%s pose_source=%s fly_speed=%.1f)",
+                        topic_.c_str(), rate_hz,
+                        cfg_.sample_rule == uav_guide::SampleRule::FirstZeroCurvature
+                            ? "first_zero_curvature" : "first_nonzero_curvature",
+                        cfg_.heads_source == uav_guide::HeadsSource::SampleYaw
+                            ? "sample_yaw" : "bearing_to_sample",
+                        cfg_.height_source == uav_guide::HeightSource::SamplePointZ
+                            ? "sample_point_z" : "target_z",
+                        pose_source_.c_str(), cfg_.fly_speed_mps);
+        }
     }
 
 private:
@@ -126,7 +145,35 @@ private:
 
     void publish(const uav_guide::GuidanceOutput& out)
     {
-        if (out.sample_fallback) {
+        const bool l1_mode = (cfg_.heads_source == uav_guide::HeadsSource::L1);
+        uav_guide::GuidanceOutput cmd = out;   // 允许改写 heads（保持上一指令 / 保护降级）
+
+        if (out.hold_previous) {
+            if (out.l1_eff_m <= 0.0) {
+                // 位姿/路径不可用：本周期不发布（宁可静默，也不发无效航向）
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                                     "[uav_guide_guidance] L1: 位姿/路径不可用 → 本周期不发布");
+                return;
+            }
+            ++hold_count_;
+            if (has_last_heads_ && hold_count_ < kHoldLimit) {
+                cmd.heads_deg = last_heads_deg_;
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                     "[uav_guide_guidance] L1 保护: β=%+.1f° (|β|>%.0f°) → "
+                                     "保持上一指令 heads=%.1f°（第 %d 周期）",
+                                     out.beta_deg, cfg_.beta_guard_deg, cmd.heads_deg, hold_count_);
+            } else {
+                // 持续越界 → 降级为“朝参考点直飞”（cmd.heads_deg 已为 LOS 航向）
+                RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                     "[uav_guide_guidance] L1 保护持续 %d 周期 → 降级为直飞参考点 "
+                                     "heads=%.1f°",
+                                     hold_count_, cmd.heads_deg);
+            }
+        } else {
+            hold_count_ = 0;
+        }
+
+        if (out.sample_fallback && !l1_mode) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                                  "[uav_guide_guidance] sample point fallback "
                                  "(no zero-curvature point in path; using end point)");
@@ -135,13 +182,24 @@ private:
         std_msgs::msg::Header header;
         header.stamp = now();
         header.frame_id = frame_id_;
-        pub_->publish(uav_guide::ros_utils::make_guidance_msg(out, header));
+        pub_->publish(uav_guide::ros_utils::make_guidance_msg(cmd, header));
+        last_heads_deg_ = cmd.heads_deg;
+        has_last_heads_  = true;
 
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
-                             "[uav_guide_guidance] heads=%.1f° fly_height=%.1f fly_speed=%.1f "
-                             "(sample#%zu%s)",
-                             out.heads_deg, out.fly_height, out.fly_speed_mps, out.sample_index,
-                             out.sample_fallback ? ", fallback" : "");
+        if (l1_mode) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "[uav_guide_guidance] L1: heads=%.1f° β=%+.1f° κ=%+.5f%s "
+                                 "L1=%.0fm%s fly_height=%.1f",
+                                 cmd.heads_deg, out.beta_deg, out.kappa_cmd,
+                                 out.l1_saturated ? "(饱和)" : "", out.l1_eff_m,
+                                 out.near_end ? "(near_end)" : "", cmd.fly_height);
+        } else {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "[uav_guide_guidance] heads=%.1f° fly_height=%.1f fly_speed=%.1f "
+                                 "(sample#%zu%s)",
+                                 cmd.heads_deg, cmd.fly_height, cmd.fly_speed_mps, out.sample_index,
+                                 out.sample_fallback ? ", fallback" : "");
+        }
     }
 
     std::string topic_, pose_source_, map_frame_, uav_frame_, frame_id_;
@@ -150,6 +208,11 @@ private:
     std::vector<uav_guide::PathPoint> path_;
     uav_guide::State5 target_;
     uav_guide::State5 uav_from_topic_;
+
+    // L1 保护状态：保持上一指令 / 连续越界降级
+    bool   has_last_heads_ = false;
+    double last_heads_deg_ = 0.0;
+    int    hold_count_     = 0;
 
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;

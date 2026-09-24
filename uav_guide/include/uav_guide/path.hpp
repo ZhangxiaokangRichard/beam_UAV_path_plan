@@ -35,6 +35,27 @@ std::vector<Segment> segment(const std::vector<PathPoint>& points,
 /// 距给定平面点最近的路径点索引（空路径返回 0）
 std::size_t closest_index(const std::vector<PathPoint>& points, double x, double y);
 
+/// 路径总长（相邻点折线长度累加，m）
+double length(const std::vector<PathPoint>& points);
+
+/// 路径上的投影点（**段内线性插值**，用于消除大点距造成的指令跳变）
+struct Projection {
+    bool valid = false;
+    std::size_t seg_index = 0;  // 投影片段起点索引（段 = [seg_index, seg_index+1]）
+    double t = 0.0;             // 段内参数 [0,1]
+    double s_m = 0.0;           // 沿路径里程（m）
+    double x = 0.0, y = 0.0, z = 0.0;
+    double yaw = 0.0;           // 取该段起点航向（yaw 有回绕，不做插值）
+    double distance_m = 0.0;    // 本机 → 投影点距离
+};
+
+/// 求本机 (x,y) 在路径折线上的最近投影（单点路径退化为该点；空路径 valid=false）
+Projection project(const std::vector<PathPoint>& points, double x, double y);
+
+/// 取沿路径里程 s_m 处的插值点；s_m 超界则夹到端点（clamped 非空时回写是否夹到）
+PathPoint point_at_arclength(const std::vector<PathPoint>& points, double s_m,
+                             std::size_t* seg_index = nullptr, bool* clamped = nullptr);
+
 /// 圆弧圆心：ENU 下已知起点位姿、半径与转向
 std::pair<double, double> arc_center_xy(double x, double y, double yaw_enu,
                                         double radius_m, bool is_left);

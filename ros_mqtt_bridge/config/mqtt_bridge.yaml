@@ -17,8 +17,8 @@
 
     geodesy:
       # 设置地理坐标系原点（ENU 坐标系的参考点）
-      origin_latitude_deg: 31.5959681
-      origin_longitude_deg: 104.9380182
+      origin_latitude_deg: 31.5934765
+      origin_longitude_deg: 104.9271017
       origin_altitude_m: 100.0
 
     target:

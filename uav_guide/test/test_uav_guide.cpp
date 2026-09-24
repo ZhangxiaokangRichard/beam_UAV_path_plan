@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -300,6 +301,227 @@ TEST(Guidance, BearingToSampleSource)
     const auto out = uav_guide::guidance::build(path, uav, target, cfg);
     EXPECT_NEAR(out.heads_deg, 0.0, 1e-6);      // 本机 → 采样点指向正北
     EXPECT_NEAR(out.fly_height, 333.0, 1e-9);   // 高度取目标 z
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 4b. L1 路径跟踪（heads_source = l1；设计见 doc/L1_tracking_plan.md）
+// ═══════════════════════════════════════════════════════════════
+
+/// 沿 +x 的直线路径（y=0），总长 length_m，点距 step（默认取现场实测的 91.559 m 大点距）
+std::vector<PathPoint> l1_straight(double length_m, double step = 91.559)
+{
+    std::vector<PathPoint> path;
+    for (double x = 0.0; x < length_m - 1e-9; x += step) {
+        path.push_back(make_point(x, 0.0, 100.0, 0.0, 0.0));
+    }
+    path.push_back(make_point(length_m, 0.0, 100.0, 0.0, 0.0));
+    return path;
+}
+
+TEST(PathGeometry, ProjectInterpolatesInsideSegment)
+{
+    const auto path = l1_straight(1000.0, 100.0);      // 点距 100 m
+    const auto p = uav_guide::path::project(path, 350.0, 30.0);
+    ASSERT_TRUE(p.valid);
+    EXPECT_EQ(p.seg_index, 3u);                        // 段 [300,400]
+    EXPECT_NEAR(p.t, 0.5, 1e-9);
+    EXPECT_NEAR(p.x, 350.0, 1e-9);
+    EXPECT_NEAR(p.y, 0.0, 1e-9);
+    EXPECT_NEAR(p.s_m, 350.0, 1e-9);
+    EXPECT_NEAR(p.distance_m, 30.0, 1e-9);
+}
+
+TEST(PathGeometry, ProjectClampsBeyondBothEnds)
+{
+    const auto path = l1_straight(1000.0, 100.0);
+    const auto front = uav_guide::path::project(path, -250.0, 0.0);
+    EXPECT_NEAR(front.x, 0.0, 1e-9);
+    EXPECT_NEAR(front.s_m, 0.0, 1e-9);
+
+    const auto back = uav_guide::path::project(path, 1500.0, 0.0);
+    EXPECT_NEAR(back.x, 1000.0, 1e-9);
+    EXPECT_NEAR(back.s_m, 1000.0, 1e-9);
+}
+
+TEST(PathGeometry, ArclengthLookupInterpolatesAndClamps)
+{
+    const auto path = l1_straight(1000.0, 100.0);
+    EXPECT_NEAR(uav_guide::path::length(path), 1000.0, 1e-9);
+
+    std::size_t idx = 99u;
+    bool clamped = true;
+    const auto mid = uav_guide::path::point_at_arclength(path, 250.0, &idx, &clamped);
+    EXPECT_NEAR(mid.x, 250.0, 1e-9);
+    EXPECT_EQ(idx, 2u);
+    EXPECT_FALSE(clamped);
+
+    const auto endp = uav_guide::path::point_at_arclength(path, 5000.0, &idx, &clamped);
+    EXPECT_NEAR(endp.x, 1000.0, 1e-9);
+    EXPECT_TRUE(clamped);
+}
+
+TEST(L1, LookaheadIsConstantAlongPath)
+{
+    GuidanceConfig cfg;                                 // 默认 L1=1000 / R_c=500 / T_lead=1 / V=50
+    const auto path = l1_straight(5000.0);
+
+    for (const double x : {0.0, 137.0, 900.0, 2500.0}) {
+        const State5 uav = uav_guide::state::make(x, 0.0, 100.0, 0.0);
+        const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+        ASSERT_TRUE(sol.ok);
+        ASSERT_FALSE(sol.guarded);
+        // 核心性质：参考点沿弧长恒定在前方 L1 处（插值后不随点距跳变）
+        EXPECT_NEAR(sol.l1_eff_m, 1000.0, 1e-9);
+        EXPECT_NEAR(sol.ref.x, x + 1000.0, 1e-6);
+        EXPECT_NEAR(sol.beta_deg, 0.0, 1e-6);
+        EXPECT_NEAR(sol.kappa_cmd, 0.0, 1e-12);
+    }
+}
+
+TEST(L1, LateralOffsetCommandsTurnTowardPath)
+{
+    GuidanceConfig cfg;
+    cfg.heads_source = HeadsSource::L1;
+    const auto path = l1_straight(5000.0);
+    const State5 uav = uav_guide::state::make(0.0, 200.0, 100.0, 0.0);   // 路径北侧 200 m
+
+    const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+    ASSERT_TRUE(sol.ok);
+    ASSERT_FALSE(sol.guarded);
+
+    const double beta = std::atan2(-200.0, 1000.0);
+    EXPECT_NEAR(sol.beta_rad, beta, 1e-9);
+    EXPECT_LT(sol.kappa_cmd, 0.0);                      // 右转回路径
+    EXPECT_NEAR(sol.kappa_cmd, 2.0 * std::sin(beta) / 1000.0, 1e-12);
+    EXPECT_FALSE(sol.saturated);
+
+    const State5 target = uav_guide::state::make(0.0, 0.0, 0.0, 0.0);
+    const auto out = uav_guide::guidance::build(path, uav, target, cfg);
+    EXPECT_GT(out.heads_deg, 90.0);                     // 从正东右转 → 罗盘航向 > 90°
+    EXPECT_NEAR(out.heads_deg, uav_guide::geo::enu_yaw_to_heading_deg(sol.psi_cmd_enu), 1e-9);
+}
+
+TEST(L1, CurvatureSaturatesAtTurnRadius)
+{
+    GuidanceConfig cfg;
+    cfg.l1_distance_m = 500.0;                          // < 2·R_c ⇒ 存在可饱和区间
+    cfg.turn_radius_m = 500.0;
+    const auto path = l1_straight(5000.0);
+
+    // 航向偏出路径 60°：κ_ideal = 2·sin60°/500 = 0.00346 > 1/R_c = 0.002 → 饱和
+    const double yaw_enu = -60.0 * uav_guide::geo::kPi / 180.0;
+    const State5 uav = uav_guide::state::make(0.0, 0.0, 100.0, yaw_enu);
+
+    const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+    ASSERT_TRUE(sol.ok);
+    ASSERT_FALSE(sol.guarded);
+    EXPECT_NEAR(sol.beta_deg, 60.0, 1e-6);
+    EXPECT_TRUE(sol.saturated);
+    EXPECT_NEAR(sol.kappa_cmd, 1.0 / 500.0, 1e-12);
+}
+
+TEST(L1, GuardHoldsWhenReferenceIsBehind)
+{
+    GuidanceConfig cfg;
+    cfg.heads_source = HeadsSource::L1;
+    // 路径朝西（背离本机航向）→ 参考点落到本机后方，|β| ≈ 180°
+    std::vector<PathPoint> path;
+    for (int i = 0; i <= 20; ++i) {
+        path.push_back(make_point(-100.0 * i, 0.0, 100.0, uav_guide::geo::kPi, 0.0));
+    }
+    const State5 uav = uav_guide::state::make(0.0, 0.0, 100.0, 0.0);   // 朝东
+    const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+    ASSERT_TRUE(sol.ok);
+    EXPECT_TRUE(sol.guarded);
+    EXPECT_GT(std::abs(sol.beta_deg), 90.0);
+
+    const State5 target = uav_guide::state::make(0.0, 0.0, 0.0, 0.0);
+    const auto out = uav_guide::guidance::build(path, uav, target, cfg);
+    EXPECT_TRUE(out.hold_previous);                     // 节点据此保持上一指令
+    EXPECT_NEAR(out.los_heading_deg, 270.0, 1e-6);      // 参考点在正西
+}
+
+TEST(L1, NearEndClampsReferenceToPathEnd)
+{
+    GuidanceConfig cfg;                                 // L1 = 1000 > 路径总长 400
+    const auto path = l1_straight(400.0, 100.0);
+    const State5 uav = uav_guide::state::make(0.0, 0.0, 100.0, 0.0);
+
+    const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+    ASSERT_TRUE(sol.ok);
+    EXPECT_TRUE(sol.near_end);
+    EXPECT_NEAR(sol.l1_eff_m, 400.0, 1e-9);
+    EXPECT_NEAR(sol.ref.x, 400.0, 1e-9);
+}
+
+TEST(L1, MissingPoseHoldsPrevious)
+{
+    GuidanceConfig cfg;
+    cfg.heads_source = HeadsSource::L1;
+    const auto path = l1_straight(3000.0);
+    const State5 invalid;                               // valid = false
+    const State5 target = uav_guide::state::make(0.0, 0.0, 0.0, 0.0);
+
+    const auto sol = uav_guide::guidance::solve_l1(path, invalid, cfg);
+    EXPECT_FALSE(sol.ok);
+
+    const auto out = uav_guide::guidance::build(path, invalid, target, cfg);
+    EXPECT_TRUE(out.hold_previous);
+    EXPECT_NEAR(out.l1_eff_m, 0.0, 1e-12);              // 无解标志：节点应跳过发布
+}
+
+// 闭环验证：横向偏置收敛的阻尼/超调应匹配解析结果（ζ=0.707、超调 4.3%、4τ≈80 s）
+TEST(L1, ClosedLoopConvergesWithTheoryDamping)
+{
+    GuidanceConfig cfg;                                 // L1=1000, R_c=500, V=50
+    // 关掉死区以验证控制律本身的动力学；生产默认 0.5° 会留下 ~L1·tan(0.5°)=8.7 m 无差区（有意设计）
+    cfg.beta_deadband_deg = 0.0;
+    const auto path = l1_straight(20000.0, 100.0);
+    State5 uav = uav_guide::state::make(0.0, 200.0, 100.0, 0.0);   // 初始横向偏置 200 m
+    uav.speed_mps = cfg.speed_mps;
+
+    const double dt = 0.05;
+    double y_min = 0.0;
+    double y_final = 0.0;
+    for (int i = 0; i < 6000; ++i) {                    // 300 s
+        const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+        ASSERT_TRUE(sol.ok);
+        // 理想执行：实际转弯角速率 = V·κ（T_lead 只影响指令前馈，不影响闭环）
+        const double omega = cfg.speed_mps * sol.kappa_cmd;
+        uav.yaw = uav_guide::geo::wrap_angle(uav.yaw + omega * dt);
+        uav.x += cfg.speed_mps * std::cos(uav.yaw) * dt;
+        uav.y += cfg.speed_mps * std::sin(uav.yaw) * dt;
+        y_min = std::min(y_min, uav.y);
+        y_final = uav.y;
+    }
+
+    const double overshoot = -y_min / 200.0;
+    EXPECT_GT(overshoot, 0.01) << "超调应≈4.3%（ζ=0.707）";
+    EXPECT_LT(overshoot, 0.08) << "超调不应超过 8%（否则阻尼不足）";
+    EXPECT_LT(std::abs(y_final), 1.0) << "4τ≈80 s 后横向误差应收敛";
+}
+
+// 死区效应：默认 0.5° 死区会在路径附近留下有界无差区（~L1·tan(deadband)）
+TEST(L1, DeadbandLeavesBoundedResidual)
+{
+    GuidanceConfig cfg;
+    const auto path = l1_straight(20000.0, 100.0);
+    State5 uav = uav_guide::state::make(0.0, 200.0, 100.0, 0.0);
+    uav.speed_mps = cfg.speed_mps;
+
+    const double dt = 0.05;
+    for (int i = 0; i < 6000; ++i) {
+        const auto sol = uav_guide::guidance::solve_l1(path, uav, cfg);
+        ASSERT_TRUE(sol.ok);
+        uav.yaw = uav_guide::geo::wrap_angle(uav.yaw + cfg.speed_mps * sol.kappa_cmd * dt);
+        uav.x += cfg.speed_mps * std::cos(uav.yaw) * dt;
+        uav.y += cfg.speed_mps * std::sin(uav.yaw) * dt;
+    }
+    // 死区对应的横向无差区上限：L1·tan(beta_deadband) ≈ 8.73 m，实际应落在此界线内
+    const double dead_zone =
+        cfg.l1_distance_m * std::tan(cfg.beta_deadband_deg * uav_guide::geo::kPi / 180.0);
+    EXPECT_LT(std::abs(uav.y), dead_zone + 1.0);
+    EXPECT_GT(std::abs(uav.y), 0.1) << "死区存在时不应声称无静差";
 }
 
 // ═══════════════════════════════════════════════════════════════

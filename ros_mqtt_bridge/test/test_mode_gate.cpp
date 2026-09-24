@@ -13,6 +13,7 @@ using ros_mqtt_bridge::NavMode;
 using ros_mqtt_bridge::navModeName;
 using ros_mqtt_bridge::outboundPlan;
 using ros_mqtt_bridge::parseNavMode;
+using ros_mqtt_bridge::shouldSendCruiseMode;
 
 // ── 解析 ─────────────────────────────────────────────────────
 
@@ -118,4 +119,22 @@ TEST(ModeGate, NonAutoAlwaysForwardsSomething)
     for (auto mode : {NavMode::Setpoint, NavMode::Guidance}) {
         EXPECT_TRUE(forwardsSetpoint(mode) || forwardsGuidance(mode));
     }
+}
+
+// ── set_cruise_mode 发送门控（现场排查开关，见 mode_gate.h）───────
+
+TEST(ModeGate, CruiseModeGateKeepsPerFrameByDefault)
+{
+    // once_per_mode = false（默认，2026-09-20 裁决）：与 head/height 同频，每帧都发
+    EXPECT_TRUE(shouldSendCruiseMode(false, false));
+    EXPECT_TRUE(shouldSendCruiseMode(false, true));
+    EXPECT_TRUE(shouldSendCruiseMode(false, true));
+}
+
+TEST(ModeGate, CruiseModeGateOncePerModeEntry)
+{
+    // once_per_mode = true（HIL 排查用）：每次进入 guidance 只发 1 条
+    EXPECT_TRUE(shouldSendCruiseMode(true, false));
+    EXPECT_FALSE(shouldSendCruiseMode(true, true));
+    EXPECT_FALSE(shouldSendCruiseMode(true, true));
 }

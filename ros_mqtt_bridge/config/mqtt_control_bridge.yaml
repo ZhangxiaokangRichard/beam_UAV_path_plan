@@ -21,3 +21,6 @@
     # 映射表：auto → 不出网；setpoint → fly_point；guidance → 三条同频
     cmd:
       height_type: 0                   # 0 场高 / 1 绝对高度（协议 4.4.21）
+      # 跃迁到巡航模式时发 1 条，true = 每次进入 guidance 只发 1 条；
+      # false = 与 head/height 同频 5 Hz，兼作链路心跳。
+      cruise_mode_once_per_mode: true

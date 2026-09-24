@@ -117,6 +117,9 @@ public:
         event_tmpl_ = param_string(*this, "mqtt.event_services_template",
                                    "aoa/uav_control/${uav_sn}/event_services");
         dry_run_ = param_bool(*this, "mqtt.dry_run", false);
+        // 排查开关：true = 每次进入 guidance 只发 1 条 set_cruise_mode 
+        // 默认 false = 与 head/height 同频 5 Hz。
+        cruise_mode_once_ = param_bool(*this, "cmd.cruise_mode_once_per_mode", true);
 
         const std::string nav_mode_topic =
             param_string(*this, "topics.nav_mode", "aoa/uav/nav_mode");
@@ -157,11 +160,12 @@ public:
 
         RCLCPP_INFO(get_logger(),
                     "[mqtt_control_bridge] ready（纯翻译器，无节流）: broker=%s:%d event_topic=%s "
-                    "dry_run=%d nav_mode('%s')=%s height_type=%d\n"
+                    "dry_run=%d nav_mode('%s')=%s height_type=%d cruise_mode_once=%d\n"
                     "  映射: auto→不出网 | setpoint→fly_point | "
                     "guidance→set_cruise_mode+set_fly_head+set_fly_height（与上游同频 5 Hz）",
                     host.c_str(), port, event_tmpl_.c_str(), static_cast<int>(dry_run_),
-                    nav_mode_topic.c_str(), ros_mqtt_bridge::navModeName(mode_), height_type_);
+                    nav_mode_topic.c_str(), ros_mqtt_bridge::navModeName(mode_), height_type_,
+                    static_cast<int>(cruise_mode_once_));
     }
 
 private:
@@ -204,6 +208,7 @@ private:
         }
         if (parsed == mode_) return;
         mode_ = parsed;
+        cruise_mode_sent_ = false;   // 新模式进入：允许重新发一条 set_cruise_mode
         const ros_mqtt_bridge::OutboundPlan p = ros_mqtt_bridge::outboundPlan(mode_);
         RCLCPP_INFO(get_logger(), "[mqtt_control_bridge] nav_mode = %s （出网: %s）",
                     ros_mqtt_bridge::navModeName(mode_),
@@ -227,8 +232,10 @@ private:
         const ros_mqtt_bridge::OutboundPlan p = ros_mqtt_bridge::outboundPlan(mode_);
         if (!p.set_cruise_mode && !p.set_fly_head && !p.set_fly_height) return;
 
-        if (p.set_cruise_mode) {
+        if (p.set_cruise_mode &&
+            ros_mqtt_bridge::shouldSendCruiseMode(cruise_mode_once_, cruise_mode_sent_)) {
             publishRaw(ros_mqtt_bridge::encodeSetCruiseMode(mid_gen_.next()), "set_cruise_mode");
+            cruise_mode_sent_ = true;
         }
         if (p.set_fly_head) {
             publishRaw(ros_mqtt_bridge::encodeSetFlyHead(msg.heads, mid_gen_.next()), "set_fly_head");
@@ -254,6 +261,8 @@ private:
 
     ros_mqtt_bridge::NavMode mode_ = ros_mqtt_bridge::NavMode::Auto;   // 默认 auto = 不出网
     bool dry_run_ = false;
+    bool cruise_mode_once_ = false;   // set_cruise_mode 是否改为“每次模式进入 1 条”
+    bool cruise_mode_sent_ = false;   // 本次 guidance 进入是否已发过 set_cruise_mode
     int height_type_ = 0;
 
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_nav_mode_;

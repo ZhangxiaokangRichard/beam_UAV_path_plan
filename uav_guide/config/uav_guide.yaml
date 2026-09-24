@@ -62,16 +62,31 @@
       publish_rate_hz: 5.0
 
     # ── 巡航制导输出（uav_guidance_node）──
-    # 采样点 = 自本机沿 planed_path 起"首个曲率为 0 的点"（Q12/Q16 裁决）
+    # heads 产生方式（heads_source）：
+    #   l1                 —— L1 路径跟踪（前视 L1 点 + 曲率饱和 + 前馈补偿），设计见 doc/L1_tracking_plan.md
+    #   sample_yaw         —— 采样点规则（Q12/Q16 裁决）：自本机沿 planed_path 起
+    #                         "首个曲率为 0 的点"；实测在长直段/末端大转弯的计划上会看不到转弯
+    #   bearing_to_sample  —— 本机 → 采样点方位
     guidance:
       topic: "aoa/uav/guidance"
-      curvature_eps: 0.0001
+      curvature_eps: 0.00001
       fly_speed_mps: 50.0            # 常量占位（后续可接 set_fly_speed）
       # 严格按该周期发布（单一定时器，无“变化触发”补发）→ mqtt_control_bridge 1:1 透传
       publish_rate_hz: 5.0
-      sample_rule: "first_zero_curvature"     # | first_nonzero_curvature
-      heads_source: "sample_yaw"              # | bearing_to_sample
-      height_source: "sample_point_z"         # | target_z
+      heads_source: "l1"                       # l1 | sample_yaw | bearing_to_sample
+      height_source: "target_z"                # sample_point_z | target_z
+
+      # ── L1 路径跟踪参数（heads_source = l1 时生效）──
+      l1_distance_m: 1000.0                    # 前视弧长；默认满足 L1 = 2·R_c（饱和边界恰好 90°）
+      turn_radius_m: 500.0                     # 盘旋能力上限（κ 饱和用，应等于机型最小盘旋半径）
+      lead_time_s: 10.0                         # 飞控航向环时间补偿；飞控迟钝→调大，振荡→调小
+      speed_mps: 50.0                          # 地速回退值（无实测地速时使用）
+      beta_deadband_deg: 0.125                   # 偏差角死区（抑制出站流抖动）
+      beta_guard_deg: 90.0                     # 偏差角保护（越界则保持上一指令，持续则降级直飞）
+      end_shrink_ratio: 1.0                    # 末端前视收缩比例（1 = 参考点收到路径末点）
+
+      # 仅在 heads_source = sample_yaw / bearing_to_sample 时生效
+      sample_rule: "first_zero_curvature"      # | first_nonzero_curvature
       # pose_source：本机位姿来源。
       #   topic = 直接用 aoa/uav/state（**现场推荐**：无 TF 依赖，SN 变化无需改配置）
       #   tf2   = 查 map→uav_frame；需把 uav_frame 设为 mqtt_target_bridge 广播的
@@ -86,9 +101,7 @@
       tracking_mode_topic: "aoa/uav/tracking_mode"
 
     # ── 地理原点（**必须与 ros_mqtt_bridge/config/mqtt_bridge.yaml 的 geodesy.* 完全一致**）──
-    # 不一致会导致 fly_point 经纬度整体偏移（ENU→WGS84 反算错误），实测教训：差 5.4 km。
-    # 现场标定值（2026-09-18）：
     geodesy:
-      origin_latitude_deg: 31.5959681
-      origin_longitude_deg: 104.9380182
+      origin_latitude_deg: 31.5934765
+      origin_longitude_deg: 104.9271017
       origin_altitude_m: 100.0

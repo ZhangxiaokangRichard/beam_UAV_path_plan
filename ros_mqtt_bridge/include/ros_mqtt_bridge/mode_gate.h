@@ -57,4 +57,21 @@ OutboundPlan outboundPlan(NavMode mode);
 bool forwardsSetpoint(NavMode mode);
 bool forwardsGuidance(NavMode mode);
 
+/**
+ * @brief 本帧是否发送 `set_cruise_mode`（4.4.17）
+ *
+ * 现场排查结论（2026-09-24）：`set_cruise_mode` 的 `data` 为空，协议语义是"切换飞行模式"，
+ * 原设计（1.0.1 / ros2rebuild.md §765）是**跃迁到 cruise 时只发 1 次**。2.0 按 2026-09-20 裁决
+ * 改为与 head/height 同频逐帧发（兼作链路心跳）。HIL 实测：飞机对 5 Hz 的 `set_fly_head`
+ * 完全无响应（指令偏角 4.9°→98° 均不动），而**单发**一条 `set_fly_head` 立刻生效——高度怀疑
+ * 飞控把每 200 ms 一次的"切换巡航模式"当成重置航向目标，把紧随其后的航向指令覆盖掉。
+ *
+ * @param once_per_mode  true = 每次进入 guidance 模式只发 1 条（排查用）
+ * @param already_sent   本次模式进入是否已发过
+ */
+inline bool shouldSendCruiseMode(bool once_per_mode, bool already_sent)
+{
+    return !once_per_mode || !already_sent;
+}
+
 }  // namespace ros_mqtt_bridge

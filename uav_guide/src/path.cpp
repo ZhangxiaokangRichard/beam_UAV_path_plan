@@ -102,6 +102,109 @@ std::size_t closest_index(const std::vector<PathPoint>& points, double x, double
     return best_i;
 }
 
+double length(const std::vector<PathPoint>& points)
+{
+    double total = 0.0;
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        total += std::hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    }
+    return total;
+}
+
+Projection project(const std::vector<PathPoint>& points, double x, double y)
+{
+    Projection p;
+    if (points.empty()) return p;
+
+    if (points.size() == 1) {
+        p.valid = true;
+        p.seg_index = 0;
+        p.t = 0.0;
+        p.s_m = 0.0;
+        p.x = points[0].x;
+        p.y = points[0].y;
+        p.z = points[0].z;
+        p.yaw = points[0].yaw;
+        p.distance_m = std::hypot(x - p.x, y - p.y);
+        return p;
+    }
+
+    double s_acc = 0.0;
+    double best_d = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+        const double ax = points[i].x;
+        const double ay = points[i].y;
+        const double dx = points[i + 1].x - ax;
+        const double dy = points[i + 1].y - ay;
+        const double seg_len = std::hypot(dx, dy);
+
+        double t = 0.0;
+        if (seg_len > 1e-9) {
+            t = ((x - ax) * dx + (y - ay) * dy) / (seg_len * seg_len);
+            t = std::min(1.0, std::max(0.0, t));   // 夹到段内（投影落在段外时取端点）
+        }
+        const double cx = ax + t * dx;
+        const double cy = ay + t * dy;
+        const double d = std::hypot(x - cx, y - cy);
+
+        if (d < best_d) {
+            best_d = d;
+            p.valid = true;
+            p.seg_index = i;
+            p.t = t;
+            p.s_m = s_acc + t * seg_len;
+            p.x = cx;
+            p.y = cy;
+            p.z = points[i].z + t * (points[i + 1].z - points[i].z);
+            p.yaw = points[i].yaw;   // yaw 有回绕，不插值（仅诊断用）
+            p.distance_m = d;
+        }
+        s_acc += seg_len;
+    }
+    return p;
+}
+
+PathPoint point_at_arclength(const std::vector<PathPoint>& points, double s_m,
+                             std::size_t* seg_index, bool* clamped)
+{
+    if (seg_index != nullptr) *seg_index = 0;
+    if (clamped != nullptr) *clamped = false;
+    if (points.empty()) return PathPoint{};
+    if (points.size() == 1) return points.front();
+
+    const double total = length(points);
+    if (s_m <= 0.0) {
+        if (clamped != nullptr) *clamped = true;
+        return points.front();
+    }
+    if (s_m >= total) {
+        if (clamped != nullptr) *clamped = true;
+        if (seg_index != nullptr) *seg_index = points.size() - 2;
+        return points.back();
+    }
+
+    double s_acc = 0.0;
+    for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+        const double dx = points[i + 1].x - points[i].x;
+        const double dy = points[i + 1].y - points[i].y;
+        const double seg_len = std::hypot(dx, dy);
+        if (s_m <= s_acc + seg_len) {
+            const double t = (seg_len > 1e-9) ? ((s_m - s_acc) / seg_len) : 0.0;
+            PathPoint out;
+            out.x = points[i].x + t * dx;
+            out.y = points[i].y + t * dy;
+            out.z = points[i].z + t * (points[i + 1].z - points[i].z);
+            out.yaw = points[i].yaw;   // yaw 有回绕，不插值
+            out.pitch = points[i].pitch;
+            out.curvature = points[i].curvature;
+            if (seg_index != nullptr) *seg_index = i;
+            return out;
+        }
+        s_acc += seg_len;
+    }
+    return points.back();   // 不可达（s_m < total 已保证命中）
+}
+
 std::pair<double, double> arc_center_xy(double x, double y, double yaw_enu,
                                         double radius_m, bool is_left)
 {

@@ -34,6 +34,7 @@ struct State5 {
     double z = 0.0;
     double yaw = 0.0;
     double pitch = 0.0;
+    double speed_mps = 0.0;  // 地速（m/s；0 = 未知，L1 解算回退到 cfg.speed_mps）
     bool valid = false;      // 是否已收到有效状态
 };
 
@@ -60,6 +61,18 @@ struct GuidanceOutput {
     double fly_speed_mps = 0.0;
     bool sample_fallback = false;   // 采样点回退（全弧段/空路径）→ 节点限流告警
     std::size_t sample_index = 0;   // 采样点索引（日志/调参用）
+
+    // ── L1 跟踪（heads_source = L1）控制量与诊断 ──
+    double beta_deg = 0.0;         // 偏差角 β（正 = 参考点在本机航向左侧）
+    double kappa_cmd = 0.0;        // 期望曲率 (1/m)，已按 turn_radius_m 饱和
+    double l1_eff_m = 0.0;         // 本周期实际前视距离（末端会收缩）
+    double l1_point_x = 0.0;       // 参考点位置（ENU）
+    double l1_point_y = 0.0;
+    double los_heading_deg = 0.0;  // "朝参考点直飞"的航向（保护降级用）
+    std::size_t l1_index = 0;      // 参考点所在段起点索引（诊断）
+    bool l1_saturated = false;     // κ 是否被盘旋能力上限饱和
+    bool near_end = false;         // 参考点收在路径末端
+    bool hold_previous = false;    // |β| 越界 → 本周期保持上一指令（节点负责）
 };
 
 // ── 配置 ─────────────────────────────────────────────────────
@@ -109,6 +122,7 @@ enum class SampleRule {
 enum class HeadsSource {
     SampleYaw,        // 采样点自带 ENU 航向（默认）
     BearingToSample,  // 本机 → 采样点的 ENU 方位角
+    L1,               // L1 路径跟踪（前视 L1 点 + 曲率饱和 + 前馈补偿，见 doc/L1_tracking_plan.md）
 };
 
 /// 期望高度取法
@@ -124,6 +138,15 @@ struct GuidanceConfig {
     SampleRule sample_rule = SampleRule::FirstZeroCurvature;
     HeadsSource heads_source = HeadsSource::SampleYaw;
     HeightSource height_source = HeightSource::SamplePointZ;
+
+    // ── L1 路径跟踪（heads_source = L1 时生效；设计见 doc/L1_tracking_plan.md）──
+    double l1_distance_m = 1000.0;    // 前视弧长（参考点沿路径里程）
+    double turn_radius_m = 500.0;     // 盘旋能力上限（κ 饱和用）
+    double lead_time_s = 1.0;         // 飞控航向环时间补偿
+    double speed_mps = 50.0;          // 地速回退值（无实测地速时使用）
+    double beta_deadband_deg = 0.5;   // 偏差角死区
+    double beta_guard_deg = 90.0;     // 偏差角保护阈值（越界则保持上一指令）
+    double end_shrink_ratio = 1.0;    // 末端前视收缩比例（1 = 收到路径末点）
 };
 
 /// APPROACH / TRACKING 状态机配置（取值与 1.0.1 的 uav_guide.yaml 一致）
