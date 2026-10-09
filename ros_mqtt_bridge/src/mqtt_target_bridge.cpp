@@ -1,15 +1,21 @@
 /**
  * @file mqtt_target_bridge.cpp
- * @brief MQTT → ROS2 位姿桥（P2）：aoa/uav_center/+/uav_info → aoa/uav/state、aoa/target/state
+ * @brief MQTT ↔ ROS2 位姿桥：
+ *         入站：aoa/uav_center/+/uav_info → aoa/uav/state、aoa/target/state
+ *         出站：aoa/{uav,target}/state、aoa/uav/planed_path → `aoa/ai_guide/display/*`
+ *                （供窗口程序 / 地面站叠加显示；ENU + 经纬高 + 全路径点）
  *
  * 与 1.0.1 的 mqtt_target_bridge 等价：
  *   - **MQTT 订阅主题、uav_sn 过滤与路由、去重、速度卡尔曼**全部保持不变
  *   - 新增/变化：ROS 话题加 aoa/ 前缀；TF 改用 tf2_ros；主循环改 wall timer
+ *   - **新增（2.1）**：出站显示通道（`display.*`），可由 `display.enabled=false` 关闭
  *   - 本节点全权负责：uav_sn 辨识、局部 ENU 坐标（geodesy）、tf2 接口
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -26,6 +32,7 @@
 #include "ros_mqtt_bridge/json_codec.h"
 #include "ros_mqtt_bridge/mqtt_client.h"
 #include "ros_mqtt_bridge/velocity_filter.h"
+#include "uav_guide/msg/uav_planned_path.hpp"
 
 namespace {
 
@@ -72,11 +79,20 @@ bool param_bool(const rclcpp::Node& node, const std::string& name, bool fallback
     return fallback;
 }
 
+/// 最近一次有效位姿快照（出站显示通道用，含四元数）
+struct PoseSnapshot {
+    double x = 0.0, y = 0.0, z = 0.0;
+    double qx = 0.0, qy = 0.0, qz = 0.0, qw = 1.0;
+    double vx = 0.0, vy = 0.0, vz = 0.0;
+};
+
 /// 单架 UAV 的追踪状态（算法与 1.0.1 一致）
 struct UavTracker {
     std::string uav_sn;
     std::string role;
     rclcpp::Publisher<nav_msgs::msg::Odometry>* pub = nullptr;
+    PoseSnapshot pose;      // 显示通道：ENU 位姿快照
+    std::string mode;       // 显示通道：飞控模式（来自 uav_info.mode）
 
     std::string last_mid;
     unsigned long long last_ts = 0;
@@ -144,6 +160,20 @@ int main(int argc, char** argv)
     const std::string target_state_topic =
         param_string(*node, "topics.target_state", "aoa/target/state");
     const std::string world_frame = param_string(*node, "tf.world_frame", "map");
+
+    // ── 出站显示通道（ROS → MQTT，供窗口程序 / 地面站叠加显示）──
+    const bool display_enabled = param_bool(*node, "display.enabled", true);
+    const double display_rate_hz = param_double(*node, "display.rate_hz", 2.0);
+    const bool display_geodetic = param_bool(*node, "display.include_geodetic", true);
+    const std::int64_t display_path_max_points = param_int(*node, "display.path_max_points", 0);
+    const std::string disp_uav_topic =
+        param_string(*node, "display.uav_state_topic", "aoa/ai_guide/display/uav_state");
+    const std::string disp_target_topic =
+        param_string(*node, "display.target_state_topic", "aoa/ai_guide/display/target_state");
+    const std::string disp_path_topic =
+        param_string(*node, "display.planed_path_topic", "aoa/ai_guide/display/planed_path");
+    const std::string planed_path_topic =
+        param_string(*node, "topics.planed_path", "aoa/uav/planed_path");
 
     if (std::abs(origin_lat) < 1e-12 && std::abs(origin_lon) < 1e-12) {
         RCLCPP_FATAL(node->get_logger(),
@@ -323,6 +353,19 @@ int main(int argc, char** argv)
         trk.has_state = true;
         trk.last_received = odom.header.stamp;
 
+        // 显示通道快照（ENU 位置 + 四元数 + ENU 线速度 + 飞控模式）
+        trk.pose = PoseSnapshot{x,
+                                y,
+                                z,
+                                q.x(),
+                                q.y(),
+                                q.z(),
+                                q.w(),
+                                trk.vel_kf.vx(),
+                                trk.vel_kf.vy(),
+                                state.up_mps};
+        trk.mode = state.mode;
+
         if (trk.first_publish) {
             RCLCPP_INFO(node->get_logger(),
                         "[mqtt_target_bridge] %s first pub: sn=%s pos=(%.1f,%.1f,%.1f) "
@@ -333,6 +376,130 @@ int main(int argc, char** argv)
             trk.first_publish = false;
         }
     };
+
+    // ══ 出站显示通道（ROS → MQTT，供窗口程序 / 地面站叠加显示）══
+    //    1) 周期上报本机/目标位姿（display.rate_hz，默认 2 Hz）
+    //    2) 规划路径变化时上报一次（时间戳/点数变化）
+    //    只发布不订阅：MqttClient 无订阅话题，仅建立连接。
+    ros_mqtt_bridge::MqttClient mqtt_display("bridge_display", host, port, keepalive, qos,
+                                             [](const std::string&, const std::string&) {});
+    ros_mqtt_bridge::MidGenerator display_mid;
+
+    struct PathCache {
+        bool valid = false;
+        ros_mqtt_bridge::DisplayPath data;
+        std::uint32_t stamp_sec = 0;
+        std::uint32_t stamp_nsec = 0;
+    };
+    PathCache path_cache;
+    std::uint32_t path_pub_sec = 0;
+    std::uint32_t path_pub_nsec = 0;
+    std::size_t path_pub_count = static_cast<std::size_t>(-1);
+    bool path_pub_logged = false;
+
+    bool display_ok = false;
+    if (display_enabled) {
+        display_ok = mqtt_display.start();   // 无订阅话题 → 仅建立连接
+        if (!display_ok) {
+            RCLCPP_WARN(node->get_logger(), "[mqtt_target_bridge] display MQTT 连接失败（%s:%d）",
+                        host.c_str(), port);
+        } else {
+            RCLCPP_INFO(node->get_logger(),
+                        "[mqtt_target_bridge] display out: uav=%s target=%s path=%s @%.1fHz "
+                        "(geodetic=%d path_max_points=%lld)",
+                        disp_uav_topic.c_str(), disp_target_topic.c_str(), disp_path_topic.c_str(),
+                        display_rate_hz, static_cast<int>(display_geodetic),
+                        static_cast<long long>(display_path_max_points));
+        }
+    }
+
+    // 规划路径（latched）：只在缓存里记下，由显示定时器做变化检测后上报
+    auto sub_planed_path = node->create_subscription<uav_guide::msg::UavPlannedPath>(
+        planed_path_topic, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+        [&](uav_guide::msg::UavPlannedPath::SharedPtr msg) {
+            PathCache c;
+            c.valid = true;
+            c.stamp_sec = msg->header.stamp.sec;
+            c.stamp_nsec = msg->header.stamp.nanosec;
+            c.data.frame = world_frame;
+            c.data.success = msg->success;
+            c.data.cost = msg->cost;
+            c.data.status_message = msg->status_message;
+            c.data.points.reserve(msg->path.size());
+            for (const auto& p : msg->path) {
+                c.data.points.push_back({p.x, p.y, p.z, p.yaw, p.pitch, p.curvature});
+            }
+            if (display_path_max_points > 0) {
+                c.data.points = ros_mqtt_bridge::decimatePath(
+                    c.data.points, static_cast<std::size_t>(display_path_max_points));
+            }
+            path_cache = std::move(c);
+        });
+
+    const int display_period_ms =
+        std::max(50, static_cast<int>(1000.0 / std::max(0.1, display_rate_hz)));
+    auto display_timer = node->create_wall_timer(std::chrono::milliseconds(display_period_ms), [&]() {
+        if (!display_enabled || !display_ok) return;
+
+        // 1) 本机与目标位姿
+        for (UavTracker* trk : {own_trk.get(), target_trk.get()}) {
+            if (trk->uav_sn.empty() || !trk->has_state) continue;
+            const bool is_own = (trk->role == "own");
+
+            ros_mqtt_bridge::DisplayPose pose;
+            pose.uav_sn = trk->uav_sn;
+            pose.role = trk->role;
+            pose.frame = world_frame;
+            pose.mode = trk->mode;
+            pose.x = trk->pose.x;
+            pose.y = trk->pose.y;
+            pose.z = trk->pose.z;
+            pose.qx = trk->pose.qx;
+            pose.qy = trk->pose.qy;
+            pose.qz = trk->pose.qz;
+            pose.qw = trk->pose.qw;
+            pose.vx = trk->pose.vx;
+            pose.vy = trk->pose.vy;
+            pose.vz = trk->pose.vz;
+            if (display_geodetic) {
+                const auto geo = geodesy.toGeodetic(trk->pose.x, trk->pose.y, trk->pose.z);
+                pose.include_geodetic = true;
+                pose.longitude_deg = geo.longitude_deg;
+                pose.latitude_deg = geo.latitude_deg;
+                pose.altitude_m = geo.altitude_m;
+            }
+
+            const std::string payload = ros_mqtt_bridge::makeBasePackage(
+                is_own ? "uav_state" : "target_state",
+                ros_mqtt_bridge::encodeDisplayPoseData(pose), display_mid.next());
+            if (!mqtt_display.publish(is_own ? disp_uav_topic : disp_target_topic, payload)) {
+                RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 5000,
+                                     "[mqtt_target_bridge] display publish failed (broker down?)");
+            }
+        }
+
+        // 2) 规划路径：仅在时间戳或点数变化时上报（避免 2 Hz 重复刷同一条路径）
+        if (path_cache.valid && (path_cache.stamp_sec != path_pub_sec ||
+                                 path_cache.stamp_nsec != path_pub_nsec ||
+                                 path_cache.data.points.size() != path_pub_count)) {
+            ros_mqtt_bridge::DisplayPath d = path_cache.data;
+            d.uav_sn = own_trk->uav_sn.empty() ? std::string("unknown") : own_trk->uav_sn;
+            const std::string payload = ros_mqtt_bridge::makeBasePackage(
+                "planed_path", ros_mqtt_bridge::encodeDisplayPathData(d), display_mid.next());
+            if (mqtt_display.publish(disp_path_topic, payload)) {
+                path_pub_sec = path_cache.stamp_sec;
+                path_pub_nsec = path_cache.stamp_nsec;
+                path_pub_count = path_cache.data.points.size();
+                if (!path_pub_logged) {
+                    RCLCPP_INFO(node->get_logger(),
+                                "[mqtt_target_bridge] display planed_path → %s (pts=%zu ok=%d)",
+                                disp_path_topic.c_str(), path_pub_count,
+                                static_cast<int>(d.success));
+                    path_pub_logged = true;
+                }
+            }
+        }
+    });
 
     // ── 主循环（10 Hz，等价 1.0.1 的 ros::Rate(10)）──
     auto timer = node->create_wall_timer(std::chrono::milliseconds(100), [&]() {
@@ -433,10 +600,11 @@ int main(int argc, char** argv)
 
     RCLCPP_INFO(node->get_logger(),
                 "[mqtt_target_bridge] ready: broker=%s:%d (target %s:%d / own %s:%d) "
-                "uav_info=%s → %s / %s (frame=%s, publish_tf=%d)",
+                "uav_info=%s → %s / %s (frame=%s, publish_tf=%d, display=%d rate=%.1fHz)",
                 host.c_str(), port, target_host.c_str(), target_port, own_host.c_str(), own_port,
                 uav_info_topic.c_str(), uav_state_topic.c_str(), target_state_topic.c_str(),
-                world_frame.c_str(), static_cast<int>(publish_tf));
+                world_frame.c_str(), static_cast<int>(publish_tf),
+                static_cast<int>(display_enabled), display_rate_hz);
 
     rclcpp::spin(node);
     rclcpp::shutdown();

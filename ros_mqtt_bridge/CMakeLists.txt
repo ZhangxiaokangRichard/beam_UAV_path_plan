@@ -25,6 +25,7 @@ add_library(ros_mqtt_bridge_core STATIC
   src/geodesy.cpp
   src/json_codec.cpp
   src/mode_gate.cpp
+  src/proc_spec.cpp
 )
 target_include_directories(ros_mqtt_bridge_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -35,10 +36,10 @@ target_link_libraries(ros_mqtt_bridge_core ${MOSQUITTO_LIBRARY})
 
 # ── 节点 ─────────────────────────────────────────────────────
 
-# MQTT → ROS 位姿桥（P2）
+# MQTT → ROS 位姿桥（P2）+ 出站显示通道（display.*，需 uav_guide/UavPlannedPath）
 add_executable(mqtt_target_bridge src/mqtt_target_bridge.cpp)
 target_link_libraries(mqtt_target_bridge ros_mqtt_bridge_core)
-ament_target_dependencies(mqtt_target_bridge rclcpp nav_msgs geometry_msgs tf2 tf2_ros)
+ament_target_dependencies(mqtt_target_bridge rclcpp nav_msgs geometry_msgs tf2 tf2_ros uav_guide)
 
 # ROS 制导 → MQTT 出站（P6，按模式截断）
 add_executable(mqtt_control_bridge src/mqtt_control_bridge.cpp)
@@ -67,6 +68,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_mode_gate test/test_mode_gate.cpp)
   if(TARGET test_mode_gate)
     target_link_libraries(test_mode_gate ros_mqtt_bridge_core)
+  endif()
+
+  # 受管进程规格解析 + tmux 命令行构造（零 ROS）
+  ament_add_gtest(test_proc_spec test/test_proc_spec.cpp)
+  if(TARGET test_proc_spec)
+    target_link_libraries(test_proc_spec ros_mqtt_bridge_core)
   endif()
 endif()
 

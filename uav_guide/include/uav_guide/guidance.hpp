@@ -43,7 +43,7 @@ L1Solution solve_l1(const std::vector<PathPoint>& path,
                     const State5& uav,
                     const GuidanceConfig& cfg);
 
-/// 制导解算（→ Guidance.msg）
+/// 制导解算（Guidance.msg）
 GuidanceOutput build(const std::vector<PathPoint>& path,
                      const State5& uav,
                      const State5& target,

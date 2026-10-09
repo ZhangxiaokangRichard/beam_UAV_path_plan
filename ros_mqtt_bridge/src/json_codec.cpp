@@ -10,9 +10,12 @@
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <iomanip>
 #include <sstream>
@@ -31,13 +34,86 @@ bool readRequired(const ptree& tree, const std::string& key, T& value, std::stri
     value = *optional;
     return true;
 }
+
+/**
+ * 把非法 UTF-8 字节替换为 '?'。
+ *
+ * 现场实测（2026-10-09）：`uav_caster/uavs_information` 中某个 `uav_sn` 为
+ * 20 字节 `0xFF`（占位/损坏），使 `boost::property_tree::read_json` 抛
+ * `invalid code sequence`，导致 **整条列表被丢弃** → 两个 tracker 的 uav_sn
+ * 一直为空 → `aoa/uav/state`、`aoa/target/state` 整条断流。
+ * 净化后仅损坏项受影响（其 sn 变为一串 '?'，不会匹配任何 filter），
+ * 正常项（ASCII SN）字节不变。
+ */
+std::string sanitizeUtf8(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    const std::size_t n = in.size();
+    std::size_t i = 0;
+    while (i < n) {
+        const unsigned char c = static_cast<unsigned char>(in[i]);
+        std::size_t len = 0;
+        if (c < 0x80) {
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            len = 4;
+        } else {
+            out += '?';
+            ++i;
+            continue;
+        }
+        if (i + len > n) {
+            out += '?';
+            ++i;
+            continue;
+        }
+        bool valid = true;
+        for (std::size_t k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(in[i + k]) & 0xC0) != 0x80) { valid = false; break; }
+        }
+        if (!valid) {
+            out += '?';
+            ++i;
+            continue;
+        }
+        out.append(in, i, len);
+        i += len;
+    }
+    return out;
+}
+
+/** 容错备用路径：不依赖 JSON 解析，直接扫描所有 `"uav_sn":"..."` 字符串值。
+ *  仅在严格 JSON 解析失败时使用（载荷结构损坏等）。 */
+bool scanUavSnValues(const std::string& payload, std::vector<std::string>& out)
+{
+    const std::string key = "\"uav_sn\"";
+    std::size_t pos = 0;
+    while ((pos = payload.find(key, pos)) != std::string::npos) {
+        pos += key.size();
+        const auto colon = payload.find(':', pos);
+        if (colon == std::string::npos) break;
+        const auto q1 = payload.find('"', colon);
+        if (q1 == std::string::npos) break;
+        const auto q2 = payload.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        std::string sn = payload.substr(q1 + 1, q2 - q1 - 1);
+        if (!sn.empty()) out.push_back(std::move(sn));
+        pos = q2 + 1;
+    }
+    return !out.empty();
+}
 }
 
 bool decodeTargetState(const std::string& payload, TargetState& state, std::string& error)
 {
     try {
     // schema 版本是协议演进的入口，未知版本不能静默按旧格式解释。
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
         const std::string schema = tree.get<std::string>("schema", "");
@@ -70,7 +146,7 @@ bool decodeUavInfo(const std::string& payload, TargetState& state, std::string& 
     // 解析地面站真实 MQTT 消息：method=uav_info，数据嵌套在 data 中。
     // yaw/pitch/roll 为角度制，需由调用方转换为弧度。
     try {
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
 
@@ -141,7 +217,7 @@ bool decodeUavsInfo(const std::string& payload, std::vector<std::string>& uav_li
     // 解析 uav_caster/uavs_information：
     // {"timestamp":...,"sender":"MQTT-CM","mid":"...","data":{"uavs":[{"uav_sn":"..."},...]}}
     try {
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
         const auto data = tree.get_child_optional("data");
@@ -156,6 +232,13 @@ bool decodeUavsInfo(const std::string& payload, std::vector<std::string>& uav_li
         if (uav_list.empty()) { error = "no uav_sn found"; return false; }
         return true;
     } catch (const std::exception& exception) {
+        // 严格解析失败 → 容错扫描（宁可丢掉一个坏字段，也不能丢掉整条列表）
+        std::vector<std::string> scanned;
+        if (scanUavSnValues(payload, scanned)) {
+            uav_list = std::move(scanned);
+            error.clear();
+            return true;
+        }
         error = exception.what();
         return false;
     }
@@ -169,7 +252,7 @@ bool decodeFstInfo(const std::string& payload, std::vector<std::string>& uav_lis
     //   {"barrel_index":2,"fill":1,"self_check":1,"uav_sn":"V2.4AOACRAFT-NOCONF0"},
     //   ...]}}
     try {
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
         const auto data = tree.get_child_optional("data");
@@ -185,6 +268,13 @@ bool decodeFstInfo(const std::string& payload, std::vector<std::string>& uav_lis
         if (uav_list.empty()) { error = "no uav_sn found in fst_info"; return false; }
         return true;
     } catch (const std::exception& exception) {
+        // 严格解析失败 → 容错扫描（同 decodeUavsInfo）
+        std::vector<std::string> scanned;
+        if (scanUavSnValues(payload, scanned)) {
+            uav_list = std::move(scanned);
+            error.clear();
+            return true;
+        }
         error = exception.what();
         return false;
     }
@@ -257,7 +347,7 @@ bool decodeStateBool(const std::string& payload, const std::string& key,
                      bool& value, std::string& error)
 {
     try {
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
         const auto optional = tree.get_optional<bool>(key);
@@ -274,7 +364,7 @@ bool decodeStateString(const std::string& payload, const std::string& key,
                        std::string& value, std::string& error)
 {
     try {
-        std::stringstream stream(payload);
+        std::stringstream stream(sanitizeUtf8(payload));
         ptree tree;
         boost::property_tree::read_json(stream, tree);
         const auto optional = tree.get_optional<std::string>(key);
@@ -285,6 +375,71 @@ bool decodeStateString(const std::string& payload, const std::string& key,
         error = exception.what();
         return false;
     }
+}
+
+// ── 拦截模式（迎头 / 尾追）入站翻译 ───────────────────────
+
+namespace {
+
+/// 去掉全部空白并转小写
+std::string lowerNoSpace(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (const char c : in) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (std::isspace(u)) continue;
+        out += static_cast<char>(std::tolower(u));
+    }
+    return out;
+}
+
+/// 取出 `"<key>"` 后的第一个字符串值（不依赖 JSON 解析，容忍结构损坏）
+bool findStringAfterKey(const std::string& payload, const std::string& quoted_key,
+                        std::string& out)
+{
+    const auto k = payload.find(quoted_key);
+    if (k == std::string::npos) return false;
+    const auto colon = payload.find(':', k + quoted_key.size());
+    if (colon == std::string::npos) return false;
+    const auto q1 = payload.find('"', colon);
+    if (q1 == std::string::npos) return false;
+    const auto q2 = payload.find('"', q1 + 1);
+    if (q2 == std::string::npos) return false;
+    out = payload.substr(q1 + 1, q2 - q1 - 1);
+    return true;
+}
+
+}  // namespace
+
+std::string normalizeInterceptMode(const std::string& raw)
+{
+    const std::string s = lowerNoSpace(raw);
+    if (s == "head-on" || s == "headon" || s == "head_on") return "head-on";
+    if (s == "tail") return "tail";
+    return {};
+}
+
+std::string extractInterceptMode(const std::string& payload)
+{
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    auto b = std::find_if(payload.begin(), payload.end(), not_space);
+    auto e = std::find_if(payload.rbegin(), payload.rend(), not_space).base();
+    if (b >= e) return {};
+    const std::string trimmed(b, e);
+
+    // 裸串形式："head-on" / "tail"
+    if (trimmed.front() != '{') return normalizeInterceptMode(trimmed);
+
+    // JSON：优先 intercept_mode，其次 mode（`find` 不区分嵌套层级，
+    // 因此 {"data":{"mode":...}} 同样命中）
+    for (const char* key : {"\"intercept_mode\"", "\"mode\""}) {
+        std::string value;
+        if (!findStringAfterKey(trimmed, key, value)) continue;
+        const std::string mode = normalizeInterceptMode(value);
+        if (!mode.empty()) return mode;
+    }
+    return {};
 }
 
 std::string encodeStateBool(const std::string& key, bool value)
@@ -368,6 +523,98 @@ std::string makeBasePackage(const std::string& method, const std::string& data_j
 std::string encodeSetCruiseMode(const std::string& mid)
 {
     return makeBasePackage("set_cruise_mode", "{}", mid);
+}
+
+// ── 出站显示通道（零 ROS，可单测）──────────────────────────
+
+namespace {
+
+/// 定点小数格式化：经纬 7 位 / 高度与 ENU 3 位 / 四元数 6 位
+std::string fixedStr(double v, int precision)
+{
+    std::ostringstream s;
+    s << std::fixed << std::setprecision(precision) << v;
+    return s.str();
+}
+
+/// JSON 字符串转义（status_message 可能含引号/反斜杠/控制字符）
+std::string escapeJsonString(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (const unsigned char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+std::string encodeDisplayPoseData(const DisplayPose& p)
+{
+    std::ostringstream o;
+    o << "{"
+      << "\"uav_sn\":\"" << escapeJsonString(p.uav_sn) << "\","
+      << "\"role\":\"" << escapeJsonString(p.role) << "\","
+      << "\"frame\":\"" << escapeJsonString(p.frame) << "\","
+      << "\"mode\":\"" << escapeJsonString(p.mode) << "\","
+      << "\"position\":{\"x\":" << fixedStr(p.x, 3) << ",\"y\":" << fixedStr(p.y, 3)
+      << ",\"z\":" << fixedStr(p.z, 3) << "},"
+      << "\"orientation\":{\"x\":" << fixedStr(p.qx, 6) << ",\"y\":" << fixedStr(p.qy, 6)
+      << ",\"z\":" << fixedStr(p.qz, 6) << ",\"w\":" << fixedStr(p.qw, 6) << "},"
+      << "\"linear\":{\"x\":" << fixedStr(p.vx, 3) << ",\"y\":" << fixedStr(p.vy, 3)
+      << ",\"z\":" << fixedStr(p.vz, 3) << "}";
+    if (p.include_geodetic) {
+        o << ",\"geodetic\":{\"longitude\":" << fixedStr(p.longitude_deg, 7)
+          << ",\"latitude\":" << fixedStr(p.latitude_deg, 7)
+          << ",\"altitude\":" << fixedStr(p.altitude_m, 2) << "}";
+    }
+    o << "}";
+    return o.str();
+}
+
+std::string encodeDisplayPathData(const DisplayPath& p)
+{
+    std::ostringstream o;
+    o << "{"
+      << "\"uav_sn\":\"" << escapeJsonString(p.uav_sn) << "\","
+      << "\"frame\":\"" << escapeJsonString(p.frame) << "\","
+      << "\"success\":" << (p.success ? "true" : "false") << ","
+      << "\"cost\":" << fixedStr(p.cost, 3) << ","
+      << "\"status_message\":\"" << escapeJsonString(p.status_message) << "\","
+      << "\"count\":" << p.points.size() << ","
+      << encodePlannedPathField("path", p.points) << "}";
+    return o.str();
+}
+
+std::vector<std::array<double, 6>> decimatePath(const std::vector<std::array<double, 6>>& points,
+                                                std::size_t max_points)
+{
+    if (max_points == 0 || points.size() <= max_points) return points;
+    if (max_points == 1) return {points.front()};
+
+    const std::size_t n = points.size();
+    std::vector<std::array<double, 6>> out;
+    out.reserve(max_points);
+    // i*(n-1)/(max-1)：首点索引 0、末点索引 n-1，中间严格递增（因 max<=n）
+    for (std::size_t i = 0; i < max_points; ++i) {
+        out.push_back(points[(i * (n - 1)) / (max_points - 1)]);
+    }
+    return out;
 }
 
 std::string encodeSetFlyHead(double heading_deg, const std::string& mid)

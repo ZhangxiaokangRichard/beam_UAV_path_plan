@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,23 @@ std::string encodeStateBool(const std::string& key, bool value);
 /** 编码 {"<key>": "<string>"} 状态载荷。 */
 std::string encodeStateString(const std::string& key, const std::string& value);
 
+// ══════════════════════════════════════════════════════════════
+// 2.1 新增：拦截模式（迎头 / 尾追）入站翻译
+//   MQTT `aoa/ai_guide/intercept/mode` → ROS `aoa/uav/intercept_mode_cmd`
+//   （下游 uav_guide_loop_node 只接受 head-on | tail）
+// ══════════════════════════════════════════════════════════════
+
+/** 规范化拦截模式：接受 `head-on` / `headon` / `head_on` / `tail`
+ *  （大小写不敏感、容忍空白），返回**规范形式** `"head-on"` / `"tail"`；
+ *  非法或空 → 返回空串。零 ROS，可单测。 */
+std::string normalizeInterceptMode(const std::string& raw);
+
+/** 从 MQTT 载荷中容错提取拦截模式：
+ *  裸串 `"tail"`，或 JSON `{"mode":...}` / `{"intercept_mode":...}` /
+ *  `{"data":{"mode":...}}`（含嵌套）。
+ *  返回规范形式 `"head-on"` / `"tail"`；无法识别 → 返回空串。 */
+std::string extractInterceptMode(const std::string& payload);
+
 /** 编码 <key>: {position, orientation, linear} 字段片段（供对象内拼接）。 */
 std::string encodeUavStateField(const std::string& key, const UavStateJson& state);
 
@@ -86,5 +104,46 @@ std::string encodeSetFlyHead(double heading_deg, const std::string& mid);
 
 /** set_fly_height（协议 4.4.21）：设置飞行高度；height_type: 0 场高 / 1 绝对高度。 */
 std::string encodeSetFlyHeight(double height_m, int height_type, const std::string& mid);
+
+// ══════════════════════════════════════════════════════════════
+// 2.1 新增：**出站显示通道**（ROS → MQTT，供窗口程序 / 地面站叠加显示）
+//   话题：aoa/ai_guide/display/{uav_state,target_state,planed_path}
+//   payload：基础包（method / timestamp / mid / data），data 见下方结构体
+//   说明：这些函数**零 ROS 依赖**，可直接单测真正的 JSON 契约。
+// ══════════════════════════════════════════════════════════════
+
+/** 显示位姿（uav_state / target_state 的 data 内容）。 */
+struct DisplayPose {
+    std::string uav_sn;
+    std::string role;             // "own" | "target"
+    std::string frame;            // 如 "map"
+    std::string mode;             // 飞控模式（如 "Auto"），可为空串
+    double x = 0.0, y = 0.0, z = 0.0;                // ENU 位置 (m)
+    double qx = 0.0, qy = 0.0, qz = 0.0, qw = 1.0;   // 姿态四元数
+    double vx = 0.0, vy = 0.0, vz = 0.0;             // 线速度 (m/s，ENU)
+    bool include_geodetic = false;                   // 是否附带经纬高
+    double longitude_deg = 0.0, latitude_deg = 0.0, altitude_m = 0.0;
+};
+
+/** 显示路径（planed_path 的 data 内容）。 */
+struct DisplayPath {
+    std::string uav_sn;
+    std::string frame;
+    std::string status_message;
+    bool success = false;
+    double cost = 0.0;
+    std::vector<std::array<double, 6>> points;   // [x,y,z,yaw,pitch,curvature]
+};
+
+/** 编码 uav_state / target_state 的 data 对象（position/orientation/linear 平铺）。 */
+std::string encodeDisplayPoseData(const DisplayPose& pose);
+
+/** 编码 planed_path 的 data 对象（含 success/cost/status_message/count/path）。 */
+std::string encodeDisplayPathData(const DisplayPath& path);
+
+/** 路径抽稀：保留**首尾点**，其余等间隔取样。
+ *  max_points==0 或 points.size()<=max_points 时原样返回；max_points==1 只留首点。 */
+std::vector<std::array<double, 6>> decimatePath(const std::vector<std::array<double, 6>>& points,
+                                                std::size_t max_points);
 
 }  // namespace ros_mqtt_bridge

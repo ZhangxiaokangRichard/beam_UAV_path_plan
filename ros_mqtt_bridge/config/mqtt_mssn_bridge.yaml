@@ -6,6 +6,8 @@
       qos: 0
       keepalive_s: 30
       mode_cmd_topic: aoa/ai_guide/nav/mode
+      # 拦截模式（迎头/尾追）入站："head-on" | "tail"（也接受 {"mode":...}）
+      intercept_mode_topic: aoa/ai_guide/intercept/mode
       nav_cmd_topic: aoa/ai_guide/nav/cmd
       guide_cmd_topic: aoa/ai_guide/guide/cmd
       nav_status_topic: aoa/ai_guide/nav/status
@@ -14,17 +16,36 @@
     topics:
       mode_state: aoa/uav/nav_mode     # ROS 镜像（纯模式名 auto|setpoint|guidance）
       tracking_mode: aoa/uav/tracking_mode
+      # 拦截模式命令的 ROS 镜像（uav_guide_loop_node 订阅；取值为 head-on|tail）
+      intercept_mode_cmd: aoa/uav/intercept_mode_cmd
+
+    intercept:
+      # true = latched（transient_local）：先发命令、后启导航栈的时序也能生效
+      # false = 普通 QoS（仅实时转发，迟到者收不到历史命令）
+      latch: true
 
     mssn:
-      enable_process_control: true   # false = 只转发模式，不启停任何进程
+      enable_process_control: true   # false = 只转发模式，不启停任何进程（离线测试用）
+
+      # ── 进程管理方式（2026-10-08 改：tmux 会话）──
+      use_tmux: true                 # true = tmux 会话（docker 友好）；false = fork+setsid 回退
+      tmux_bin: tmux                 # tmux 可执行文件名（use_tmux=true 且缺失 → 启动即 FATAL）
+      tmux_remain_on_exit: true      # 进程退出后保留 pane，便于回溯崩溃原因（tmux attach 查看）
+      tmux_session_prefix: aoa       # 规格中省略 session 时的回退前缀
+
       workspace_dir: /home/ros-dev/beamDubins_ws
       setup_shell: source /opt/ros/humble/setup.bash && source install/setup.bash
-      log_dir: /tmp/ros_mqtt_bridge_logs
+      log_dir: /tmp/ros_mqtt_bridge_logs   # 启动脚本 <session>.sh 与日志 <session>.log
       stop_timeout_s: 5.0
       status_poll_hz: 1.0
-      start_guide_on_mode: true      # 模式 != auto 时确保 mqtt_control_bridge 在线
-      stop_guide_on_auto: false      # 模式回 auto 时不自动杀死控制桥（默认保活）
-      nav_launch_command: ros2 launch uav_guide uav_guide_launch.py
-      nav_pgrep_pattern: uav_guide_launch.py
-      guide_run_command: ros2 run ros_mqtt_bridge mqtt_control_bridge
-      guide_pgrep_pattern: mqtt_control_bridge
+
+      # ── 受管进程组（每项格式："<command>|<pattern>|<session>"）──
+      #   pattern → /proc/<pid>/cmdline 子串，兜底存活探测与残留清理
+      #   session → tmux 会话名，也是人工调试入口：tmux attach -t <session>
+      #   start=true 按序拉起；start=false **逆序**停止
+      nav_procs:
+        - "ros2 launch uav_guide uav_guide_launch.py|uav_guide_launch.py|aoa_nav"
+        - "ros2 launch ros_mqtt_bridge mqtt_control_bridge.launch.py|mqtt_control_bridge.launch.py|aoa_control"
+
+      guide_procs:
+        - "ros2 launch ros_mqtt_bridge mqtt_bridge.launch.py|mqtt_bridge.launch.py|aoa_bridge"

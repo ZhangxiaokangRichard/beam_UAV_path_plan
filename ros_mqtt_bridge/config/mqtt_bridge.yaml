@@ -38,9 +38,23 @@
       own_uav_topic: "uav_caster/uavs_information"
       own_uav_filter: "NOCON"       # 现场实测 sn 为 V2.4AOACRAFT-NOCONF0
 
+    # ── ROS 侧话题 ──
     topics:
       uav_state: "aoa/uav/state"
       target_state: "aoa/target/state"
+      planed_path: "aoa/uav/planed_path"       # 出站显示通道的输入（规划路径，latched）
+
+    # 出站显示通道（ROS → MQTT，2026-10-08 新增）：供窗口程序 / 地面站叠加显示
+    #   auto/setpoint/guidance 等入站话题与出站控制指令均不变，
+    #   本节只影响**对外展示**，不参与控制链路。
+    display:
+      enabled: true                            # false = 完全关闭出站展示
+      rate_hz: 2.0                             # 本机/目标位姿上报频率
+      include_geodetic: true                   # 载荷是否附带经纬高（由 ENU 反算，便于窗口直接落图）
+      path_max_points: 0                       # >0 时对路径抽稀（保留首尾点）
+      uav_state_topic: "aoa/ai_guide/display/uav_state"
+      target_state_topic: "aoa/ai_guide/display/target_state"
+      planed_path_topic: "aoa/ai_guide/display/planed_path"
 
     tf:
       world_frame: "map"            # 与 1.0.1 一致：map → <uav_sn>

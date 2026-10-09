@@ -26,12 +26,12 @@
 
     # ── APPROACH / TRACKING 判据（与 1.0.1 一致）──
     target:
-      approach_distance_tail: 1500.0
-      approach_distance_headon: 2300.0
-      tracking_entry_dist: 2400.0
+      approach_distance_tail: 1200.0
+      approach_distance_headon: 1800.0
+      tracking_entry_dist: 1900.0
       tracking_window: 100.0
       divergence_threshold: 3
-      velocity_align_deg: 70.0
+      velocity_align_deg: 55.0
       min_closure_m: 3.0
       min_closure_m_tail: 1.5
       entry_hold_count: 1
@@ -79,7 +79,7 @@
       # ── L1 路径跟踪参数（heads_source = l1 时生效）──
       l1_distance_m: 1000.0                    # 前视弧长；默认满足 L1 = 2·R_c（饱和边界恰好 90°）
       turn_radius_m: 500.0                     # 盘旋能力上限（κ 饱和用，应等于机型最小盘旋半径）
-      lead_time_s: 10.0                         # 飞控航向环时间补偿；飞控迟钝→调大，振荡→调小
+      lead_time_s: 20.0                         # 飞控航向环时间补偿；飞控迟钝→调大，振荡→调小
       speed_mps: 50.0                          # 地速回退值（无实测地速时使用）
       beta_deadband_deg: 0.125                   # 偏差角死区（抑制出站流抖动）
       beta_guard_deg: 90.0                     # 偏差角保护（越界则保持上一指令，持续则降级直飞）
