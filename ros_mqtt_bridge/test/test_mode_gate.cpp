@@ -14,6 +14,7 @@ using ros_mqtt_bridge::navModeName;
 using ros_mqtt_bridge::outboundPlan;
 using ros_mqtt_bridge::parseNavMode;
 using ros_mqtt_bridge::shouldSendCruiseMode;
+using ros_mqtt_bridge::shouldResendFlyHeight;
 
 // ── 解析 ─────────────────────────────────────────────────────
 
@@ -137,4 +138,58 @@ TEST(ModeGate, CruiseModeGateOncePerModeEntry)
     EXPECT_TRUE(shouldSendCruiseMode(true, false));
     EXPECT_FALSE(shouldSendCruiseMode(true, true));
     EXPECT_FALSE(shouldSendCruiseMode(true, true));
+}
+
+// ── set_fly_height **闭环重发**门控（2026-10-09 改版，替代自举式死区）───
+//   默认阈值：到位 0.5 m，静止 0.25 m/s，最小重发间隔 1.0 s
+
+TEST(ModeGate, FlyHeightFirstMessageAlwaysSent)
+{
+    // 未发过（首次 / 刚进 guidance）→ 必发，建立闭环
+    EXPECT_TRUE(shouldResendFlyHeight(false, 999.0, 400.0, 400.0, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_TRUE(shouldResendFlyHeight(false, 0.0, 400.0, 200.0, 0.0, 0.5, 0.25, 1.0));
+}
+
+TEST(ModeGate, FlyHeightSilentWhenReached)
+{
+    // 已到位（|cmd − 实测| ≤ 0.5 m）→ 静默，**不再刷指令**
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 400.0, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 399.5, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 400.5, 0.0, 0.5, 0.25, 1.0));
+    // 边界：误差恰等于 0.5 → 视为已到位（严格大于才算未到位）
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 399.5, 0.0, 0.5, 0.25, 1.0));
+}
+
+TEST(ModeGate, FlyHeightResendsWhenStalledAndOffTarget)
+{
+    // 核心诉求：飞机“停了但没到位” → **补发**（消除高度静差）
+    EXPECT_TRUE(shouldResendFlyHeight(true, 10.0, 400.0, 350.0, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_TRUE(shouldResendFlyHeight(true, 10.0, 400.0, 350.0, 0.10, 0.5, 0.25, 1.0));
+    EXPECT_TRUE(shouldResendFlyHeight(true, 10.0, 400.0, 450.0, -0.20, 0.5, 0.25, 1.0));
+    // 边界：|dz/dt| 恰等于 0.25 → 视为仍在运动，不补发
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 350.0, 0.25, 0.5, 0.25, 1.0));
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 350.0, -0.25, 0.5, 0.25, 1.0));
+}
+
+TEST(ModeGate, FlyHeightNoResendWhileMoving)
+{
+    // 仍在爬/降（|dz/dt| ≥ 0.25）→ 不打断，等它停下来再说
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 300.0, 1.5, 0.5, 0.25, 1.0));
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 300.0, -3.0, 0.5, 0.25, 1.0));
+}
+
+TEST(ModeGate, FlyHeightRespectsResendDelay)
+{
+    // 刚发过（< 1.0 s）：即使飞机还没反应（dz/dt≈0、误差很大）也不补发
+    EXPECT_FALSE(shouldResendFlyHeight(true, 0.0, 400.0, 200.0, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_FALSE(shouldResendFlyHeight(true, 0.99, 400.0, 200.0, 0.0, 0.5, 0.25, 1.0));
+    EXPECT_TRUE(shouldResendFlyHeight(true, 1.0, 400.0, 200.0, 0.0, 0.5, 0.25, 1.0));
+}
+
+TEST(ModeGate, FlyHeightThresholdsAreConfigurable)
+{
+    // 阈值可调：放宽到 3 m / 0.5 m/s 后，同一场景不再补发
+    EXPECT_FALSE(shouldResendFlyHeight(true, 10.0, 400.0, 398.0, 0.0, 3.0, 0.5, 1.0));
+    // 收紧到 0.1 m / 0.05 m/s 后，小残差且微小运动也算“停了没到位” → 补发
+    EXPECT_TRUE(shouldResendFlyHeight(true, 10.0, 400.0, 399.8, 0.01, 0.1, 0.05, 1.0));
 }

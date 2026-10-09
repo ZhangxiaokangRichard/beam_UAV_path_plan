@@ -11,16 +11,31 @@
       dry_run: false
 
     # ── 纯翻译器：不节流、不去抖，出站频率 == 上游 ROS 话题频率 ──
+    #    唯一例外：set_fly_height 走**闭环重发门控**（见 cmd.height_*）
     topics:
       nav_mode: aoa/uav/nav_mode      # 当前导航模式状态（auto|setpoint|guidance），latched
       setpoint: aoa/uav/setpoint       # setpoint 模式 → fly_point（5 Hz）
-      guidance: aoa/uav/guidance       # guidance 模式 → set_cruise_mode + set_fly_head +
-                                       #                set_fly_height（各 5 Hz）
-      uav_state: aoa/uav/state         # 取 uav_sn（child_frame_id）
+      guidance: aoa/uav/guidance       # guidance 模式 → set_cruise_mode + set_fly_head（各 5 Hz）
+                                       #                set_fly_height（**闭环重发门控**）
+      uav_state: aoa/uav/state         # 取 uav_sn（child_frame_id）+ 高度闭环反馈（pose.z）
 
-    # 映射表：auto → 不出网；setpoint → fly_point；guidance → 三条同频
+    # 映射表：auto → 不出网；setpoint → fly_point；guidance → head 5 Hz + height 闭环补发
     cmd:
       height_type: 0                   # 0 场高 / 1 绝对高度（协议 4.4.21）
+      # ── set_fly_height 闭环重发门控（2026-10-09 改版）──
+      # 现场背景：① 高度按 5 Hz 持续下发 → 飞控处于「持续初始化」状态；
+      #           ② 自举式死区门控 → 指令稳定时永不重发 → 高度静差；
+      #              目标快速变化时又发得过快。
+      # 现方案：每发一条后监测 aoa/uav/state 的高度变化率 dz/dt，
+      #         飞机“停了（|dz/dt| < rate）但没到位（|差| > reach）” 才补发。
+      height_reach_eps_m: 0.5         # 到位判据：|指令高度 − 实测高度| ≤ 本值 → 静默
+      height_rate_eps_mps: 0.25       # 静止判据：|dz/dt| < 本值 → 视为飞机已停下
+      height_rate_window_s: 1.0       # dz/dt 的计算窗长（滑动窗差分）
+      height_resend_delay_s: 1.0      # 距上次下发的最小间隔（等飞机反应，防连发）
+      height_offset_m: 0.0            # 基准修正：实测高度 = state.pose.z + 本值
+                                      #   （若指令高度与 ENU z 存在固定偏差，用它对齐；
+                                      #     连续 5 次补发仍不收敛时会告警提示校准）
+      height_state_timeout_s: 2.0     # aoa/uav/state 超时 → 暂停闭环补发（不做盲判）
       # 跃迁到巡航模式时发 1 条，true = 每次进入 guidance 只发 1 条；
-      # false = 与 head/height 同频 5 Hz，兼作链路心跳。
+      # false = 与 head 同频 5 Hz，兼作链路心跳。
       cruise_mode_once_per_mode: true

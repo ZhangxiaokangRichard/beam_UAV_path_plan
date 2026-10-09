@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <string>
 
 namespace ros_mqtt_bridge {
@@ -74,4 +75,43 @@ inline bool shouldSendCruiseMode(bool once_per_mode, bool already_sent)
     return !once_per_mode || !already_sent;
 }
 
+    /**
+     * @brief 本帧是否**补发** `set_fly_height`（4.4.21）—— **闭环重发门控**
+     *
+     * 演进过程：
+     * - v2.3 初版用「与上次下发值差 > 5 m」的自举式死区门控。
+     * - 现场问题（2026-10-09）：① 指令稳定时高度指令**永不重发** → 飞控失去高度目标保持，
+     *   产生**高度静差**；② 目标高度快速变化时又会每帧都发，**指令过快**。
+     * - 现方案：**闭环** —— 每发一条高度指令后，用 `aoa/uav/state` 的高度变化率判断飞机是否
+     *   已经"停下来但没到位"，是则补发一条；到位则静默。
+     *
+     * 判据（阈值均由 yaml 给定）：
+     * ```
+     * 未发过（首条 / 刚进 guidance）              → 发（建立闭环）
+     * 距上次下发 < resend_delay_s                → 不发（等飞机反应，防连发）
+     * |cmd − measured| <= reach_eps_m            → 不发（已到位，静默）
+     * |dz/dt| < rate_eps_mps 且 误差 > reach_eps_m → **发**（停了但没到位 → 补发）
+     * 其余（仍在爬/降）                           → 不发（不打断正在执行的机动）
+     * ```
+     *
+     * @param already_sent    本次模式进入后是否已下发过高度
+     * @param elapsed_s       距上次下发的时间（秒）
+     * @param cmd_height      期望高度（米）
+     * @param measured_height 实测高度（米，已含 `height_offset_m` 基准修正）
+     * @param z_rate_mps      实测高度变化率（m/s，取自 `aoa/uav/state` 的 pose.z 差分）
+     * @param reach_eps_m     到位判据（米，默认 0.5）
+     * @param rate_eps_mps    静止判据（m/s，默认 0.25）
+     * @param resend_delay_s  最小重发间隔（秒，默认 1.0）
+     */
+    inline bool shouldResendFlyHeight(bool already_sent, double elapsed_s, double cmd_height,
+                                     double measured_height, double z_rate_mps, double reach_eps_m,
+                                     double rate_eps_mps, double resend_delay_s)
+    {
+        if (!already_sent) return true;                 // 首条：建立闭环
+        if (elapsed_s < resend_delay_s) return false;   // 反应延迟内不补发
+        if (std::fabs(cmd_height - measured_height) <= reach_eps_m) return false;   // 已到位
+        return std::fabs(z_rate_mps) < rate_eps_mps;    // 停了但没到位 → 补发
+    }
+
 }  // namespace ros_mqtt_bridge
+

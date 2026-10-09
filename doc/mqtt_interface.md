@@ -1,10 +1,10 @@
-# MQTT 接口文档（ros_mqtt_bridge 2.2）
+# MQTT 接口文档（ros_mqtt_bridge 2.4）
 
 > 面向对象：**上位机 / 窗口程序 / 地面站开发者**，以及本仓库的集成调试人员。
 > 范围：`ros_mqtt_bridge` 全部 MQTT 入站 / 出站话题、报文结构、字段含义，
 > 以及 `mqtt_mssn_bridge` 的**进程管理契约**（tmux 会话）。
 >
-> 编写日期：2026-10-09　｜　对应代码：`ros_mqtt_bridge` 2.2（ROS2 Humble）
+> 编写日期：2026-10-09　｜　对应代码：`ros_mqtt_bridge` 2.4（ROS2 Humble）
 > 协议依据：《LJD 网络通讯协议》（method 名为准）
 
 ---
@@ -218,7 +218,11 @@ tail
 | `guidance` | 丢弃 | `set_cruise_mode` + `set_fly_head` + `set_fly_height`（**每帧 3 条**） |
 
 - **纯翻译器**：不做节流、不做阈值去抖、不做时间戳去重；出站频率 == 上游 ROS 频率（两个制导节点均为 5 Hz）。
-- 三条指令**顺序固定**：`set_cruise_mode → set_fly_head → set_fly_height`，顺带充当链路心跳。
+- 三条指令**顺序固定**：`set_cruise_mode → set_fly_head → set_fly_height`。
+- **唯一例外：`set_fly_height` 走「闭环重发门控」**（见 §3.2）。
+  历史演进：① 5 Hz 逐帧发 → 飞控「持续初始化」；② 自举式死区门控（差 > 5 m 才发）→ 指令稳定时**永不重发** → **高度静差**，
+  目标快速变化时又发得过快。现方案：每发一条后监测 `aoa/uav/state` 的高度变化率，飞机“**停了但没到位**”才补发、“**已到位**”则静默。
+  → guidance 模式下典型出往为 **1 条 head/帧 + height 按需**，而非固定 3 条/帧。
 
 ### 3.2 报文
 
@@ -285,6 +289,24 @@ tail
 |---|---|---|
 | `height` | int | 高度，米（由 `fly_height` 四舍五入） |
 | `height_type` | int | `0` 场高 / `1` 绝对高度（由 `mqtt_control_bridge` yaml `cmd.height_type` 指定） |
+
+**发送门控（重要，2026-10-09 改为闭环）**：`set_fly_height` **不**按 5 Hz 逐帧发，而是
+**闭环重发** —— 用 `aoa/uav/state.pose.pose.position.z` 判断飞机是否「已停下但未到位」：
+
+| 条件 | 行为 |
+|---|---|
+| 本次模式进入后**尚未发过**（含首帧、模式切回 guidance） | **必发 1 条**（建立闭环） |
+| 距上次下发 `< cmd.height_resend_delay_s`（默认 1 s） | **不发**（等飞机反应，防连发） |
+| `\|fly_height − 实测高度\| ≤ cmd.height_reach_eps_m`（默认 0.5 m） | **不发**（已到位 → 静默，不再刷指令） |
+| `\|dz/dt\| < cmd.height_rate_eps_mps`（默认 0.25 m/s）**且**未到位 | **补发 1 条**（停了但没到位 → 消除高度静差） |
+| 仍在爬/降（`\|dz/dt\| ≥ 阈值`） | **不发**（不打断正在执行的机动） |
+| `aoa/uav/state` 超过 `cmd.height_state_timeout_s`（默认 2 s）未更新 | **暫停补发**（不做盲判） |
+
+实现细节：
+- **实测高度** = `state.pose.z + cmd.height_offset_m`（默认 0）——若指令高度与 ENU z 存在固定基准偏差，用它对齐；
+- **`dz/dt`** 用 **滑动窗差分**（窗长 `cmd.height_rate_window_s`，默认 1 s）而非 EMA：EMA 从 20 m/s 衰减到阈值以下需 ~3 s，会漏判“已停下”；
+- 连续 5 次补发仍未收敛 → 告警提示校准 `cmd.height_offset_m`；
+- 仅当 `publish` **真正成功**时才前移基准（`uav_sn` 未知 / broker 断线不会误当已发）。
 
 ### 3.3 预留
 
@@ -433,6 +455,12 @@ mssn:
 | `mssn.use_tmux` | 同上 | `true` | `false` = 回退 `fork+setsid`（无 tmux 的现场） |
 | `mqtt.dry_run` | `mqtt_control_bridge.yaml` | `false` | `true` = 只打印不外发控制指令 |
 | `mqtt.event_services_template` | 同上 | `aoa/uav_control/${uav_sn}/event_services` | 重定向到沙箱话题（联调用） |
+| `cmd.height_reach_eps_m` | `mqtt_control_bridge.yaml` | `0.5` | 到位判据（m）：`|指令 − 实测| ≤ 本值` → 静默 |
+| `cmd.height_rate_eps_mps` | 同上 | `0.25` | 静止判据（m/s）：`|dz/dt| < 本值` → 视为飞机已停下 |
+| `cmd.height_rate_window_s` | 同上 | `1.0` | `dz/dt` 滑动窗长（s） |
+| `cmd.height_resend_delay_s` | 同上 | `1.0` | 最小重发间隔（s），防连发 |
+| `cmd.height_offset_m` | 同上 | `0.0` | 实测高度基准修正：`实测 = state.z + 本值` |
+| `cmd.height_state_timeout_s` | 同上 | `2.0` | `aoa/uav/state` 超时 → 暂停闭环补发 |
 | `display.enabled` | `mqtt_bridge.yaml` | `true` | `false` = 关闭全部显示出站 |
 
 **失效安全**：MQTT 断线 / 模式报文非法 / `${uav_sn}` 未知 → 保持 `auto`，不出网（漏发优于误发）。
@@ -474,6 +502,14 @@ mosquitto_sub -h 192.168.70.62 -t 'aoa/ai_guide/display/planed_path' -C 1 -F '%t
 
 # ── 出站控制（抓本机控制话题，注意：会在 guidance 模式下真发指令）──
 mosquitto_sub -h 192.168.70.62 -t 'aoa/uav_control/+/event_services' -F '%t|%p'
+
+# ── 高度闭环门控验证（建议先用沙箱话题，不碰真机）──
+#   期望：set_fly_head 每帧都有（5 Hz）；set_fly_height 仅“首条 + 停滞且未到位时的补发”
+ros2 run ros_mqtt_bridge mqtt_control_bridge --ros-args \
+  --params-file install/ros_mqtt_bridge/share/ros_mqtt_bridge/config/mqtt_control_bridge.yaml \
+  -p mqtt.event_services_template:='beam_test/uav_control/${uav_sn}/event_services'
+mosquitto_sub -h 192.168.70.62 -t 'beam_test/#' -v | grep -A 5 '"method"'
+# 观察点：控制桥日志 "set_fly_height 下发: …（实测 … 差 … dz/dt …）" 与 "… 静默: …"
 ```
 
 > ⚠ `ros2 topic echo` 必须带前导斜杠（`/aoa/uav/nav_mode`），并同时指定 `--qos-durability transient_local --qos-reliability reliable`，否则收不到 latched 消息。
@@ -494,5 +530,7 @@ mosquitto_sub -h 192.168.70.62 -t 'aoa/uav_control/+/event_services' -F '%t|%p'
 
 | 日期 | 版本 | 说明 |
 |---|---|---|
+| 2026-10-09 | 2.4 | **`set_fly_height` 改闭环重发门控**（替代自举式死区）：发一条后监测 `aoa/uav/state` 的 `dz/dt`，飞机「停了但没到位」才补发、「到位」则静默；新增阈值 `height_reach_eps_m`/`height_rate_eps_mps`/`height_rate_window_s`/`height_resend_delay_s`/`height_offset_m`/`height_state_timeout_s`。沙箱实测（15 s，指令恒定 400 m）：停滞在 200 m → 3 条；爬升中 → 0 条；停滞在 260 m → 2 条；到位 400 m → 0 条。同时修复 `set_cruise_mode` 首个发布失败仍被标记为“已发”而导致**永久丢失**的 bug |
+| 2026-10-09 | 2.3 | `set_fly_height` 首次尝试门控（自举式死区，差 > 5 m 才发）；**已被 v2.4 取代**（存在高度静差与目标快变时过快的问题） |
 | 2026-10-09 | 2.2 | ① **新增拦截模式入站** `aoa/ai_guide/intercept/mode` → ROS `aoa/uav/intercept_mode_cmd`（`head-on`\|`tail`，兼容 `headon`/`head_on`，非法值不转发，默认 latched）；② `nav/status` 增加 `intercept` 字段；③ 修复列表报文含非法 UTF-8 导致两张状态话题整个断流（`sanitizeUtf8` + 扫描兜底） |
 | 2026-10-08 | 2.1 | ① **进程管理改 tmux**：`nav/cmd` 经 tmux 启动/停止 `uav_guide_launch.py` + `mqtt_control_bridge.launch.py`；`guide/cmd` 管 `mqtt_bridge.launch.py`；② **`aoa/ai_guide/nav/mode` 降为纯翻译器**（不再因模式变化启停进程）；③ **新增出站显示通道** `aoa/ai_guide/display/{uav_state,target_state,planed_path}`；④ 状态上报增加 `procs[]` 明细 |
